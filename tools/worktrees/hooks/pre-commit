@@ -1,0 +1,10 @@
+#!/bin/sh
+# Bloqueia commit direto na branch main (fluxo de worktrees - AGENTS.md secao 2).
+# Instalado por tools/worktrees/instalar-protecao.ps1
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+if [ "$branch" = "main" ]; then
+  echo "COMMIT BLOQUEADO: a branch main e protegida - nada de commit direto nela."
+  echo "Crie uma worktree para a tarefa:  tools/worktrees/abrir.ps1 feat/minha-tarefa"
+  exit 1
+fi
+exit 0

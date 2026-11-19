@@ -18,14 +18,16 @@ Manter o port Windows estável, nativo e fiel à experiência da dock:
 Nenhuma IA trabalha direto na cópia principal. A cópia principal fica na `main`, limpa.
 
 ```powershell
-git fetch origin
-git worktree add .worktrees/feat-minha-tarefa -b feat/minha-tarefa origin/main
+tools\worktrees\abrir.ps1 feat/minha-tarefa
 ```
 
 - Trabalhe sempre dentro de `.worktrees/feat-minha-tarefa`.
 - O `node_modules` pode ser ligado por junction ao `node_modules` da cópia principal (ou a `C:\dhruva-build\node_modules` nesta máquina).
-- Ao concluir: commit, push para a `main` do seu fork (`origin`) e remova a worktree com `git worktree remove`.
-- Abrir, aprovar ou mergear Pull Request é ação humana. A IA não faz isso.
+- Ao concluir, de dentro da worktree: `tools\worktrees\fechar.ps1 -Mensagem "feat(escopo): resumo"` — commita, integra `origin/main` e publica na **main do fork no GitHub**.
+- `tools\worktrees\status.ps1` mostra worktrees ativas, limpeza pendente e PRs abertos.
+- `tools\worktrees\limpar.ps1` (ou `limpar-agendada.ps1`) remove worktrees/branches locais quando a pasta estiver livre.
+- Abrir, aprovar ou mergear Pull Request é ação humana. A IA não faz isso; o `abrir-pr.ps1` fica para uso do desenvolvedor.
+- Opcional: `tools\worktrees\instalar-protecao.ps1` instala o hook que bloqueia commit direto na `main` neste clone.
 
 ## 3. Validação obrigatória
 

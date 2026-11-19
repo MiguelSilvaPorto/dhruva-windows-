@@ -33,3 +33,7 @@ windows/dist/
 windows/src-tauri/target/
 windows/src-tauri/gen/
 windows/*.log
+
+# Worktrees locais e grafo do Graphify
+.worktrees/
+graphify-out/

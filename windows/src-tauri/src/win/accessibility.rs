@@ -8,8 +8,9 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Variant::{VARIANT, VT_I4};
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationSelectionItemPattern,
-    TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_SelectionItemPatternId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationRangeValuePattern,
+    IUIAutomationSelectionItemPattern, TreeScope_Descendants, UIA_ControlTypePropertyId,
+    UIA_RangeValuePatternId, UIA_SelectionItemPatternId, UIA_SliderControlTypeId,
     UIA_TabItemControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
@@ -25,6 +26,13 @@ pub struct TabSelection {
     pub media_title: String,
     pub previous_title: String,
     pub switched: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSample {
+    pub position_ms: u64,
+    pub duration_ms: u64,
 }
 
 /// Selects the browser tab that matches the media title and remembers the
@@ -48,6 +56,17 @@ pub fn select_tab(hwnds: &[i64], title: &str) -> Option<TabSelection> {
 }
 
 pub fn restore_tab(selection: &TabSelection) -> bool {
+    restore_tab_with(selection, false)
+}
+
+/// Restores the previous tab without checking whether the media tab is still
+/// active. Used after a brief timeline sync, where the tab switch can be
+/// faster than Chrome's window-title update.
+pub fn restore_tab_force(selection: &TabSelection) -> bool {
+    restore_tab_with(selection, true)
+}
+
+fn restore_tab_with(selection: &TabSelection, force: bool) -> bool {
     if !selection.switched {
         return false;
     }
@@ -55,7 +74,7 @@ pub fn restore_tab(selection: &TabSelection) -> bool {
     let selection = selection.clone();
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let restored = unsafe { restore_inner(&selection) };
+        let restored = unsafe { restore_inner(&selection, force) };
         let _ = sender.send(restored);
     });
 
@@ -67,23 +86,86 @@ unsafe fn automation() -> Option<IUIAutomation> {
     CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL).ok()
 }
 
-unsafe fn tab_condition(
+unsafe fn control_condition(
     automation: &IUIAutomation,
+    control_type: i32,
 ) -> Option<windows::Win32::UI::Accessibility::IUIAutomationCondition> {
     let mut variant = VARIANT::default();
     let inner = &mut *variant.Anonymous.Anonymous;
     inner.vt = VT_I4;
-    inner.Anonymous.lVal = UIA_TabItemControlTypeId.0;
+    inner.Anonymous.lVal = control_type;
 
     automation
         .CreatePropertyCondition(UIA_ControlTypePropertyId, &variant)
         .ok()
 }
 
-fn window_title(hwnd: i64) -> String {
+fn tab_condition(
+    automation: &IUIAutomation,
+) -> Option<windows::Win32::UI::Accessibility::IUIAutomationCondition> {
+    unsafe { control_condition(automation, UIA_TabItemControlTypeId.0) }
+}
+
+fn slider_condition(
+    automation: &IUIAutomation,
+) -> Option<windows::Win32::UI::Accessibility::IUIAutomationCondition> {
+    unsafe { control_condition(automation, UIA_SliderControlTypeId.0) }
+}
+
+pub fn window_title(hwnd: i64) -> String {
     let mut buffer = [0u16; 512];
     let len = unsafe { GetWindowTextW(HWND(hwnd as *mut _), &mut buffer) };
     String::from_utf16_lossy(&buffer[..len.max(0) as usize])
+}
+
+/// Reads the YouTube player's own progress slider. Only the active tab
+/// exposes its DOM to the accessibility tree.
+pub fn read_timeline(hwnd: i64) -> Option<TimelineSample> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let found = unsafe { read_timeline_inner(hwnd) };
+        let _ = sender.send(found);
+    });
+
+    receiver.recv_timeout(UIA_TIMEOUT).ok().flatten()
+}
+
+unsafe fn read_timeline_inner(hwnd: i64) -> Option<TimelineSample> {
+    let automation = automation()?;
+    let condition = slider_condition(&automation)?;
+    let element = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+    let sliders = element.FindAll(TreeScope_Descendants, &condition).ok()?;
+
+    let count = sliders.Length().unwrap_or(0);
+    for index in 0..count {
+        let Ok(slider) = sliders.GetElement(index) else {
+            continue;
+        };
+        let Ok(class) = slider.CurrentClassName() else {
+            continue;
+        };
+        if !class.to_string().eq_ignore_ascii_case("ytp-progress-bar") {
+            continue;
+        }
+
+        let Ok(pattern) = slider
+            .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
+        else {
+            continue;
+        };
+        let value = pattern.CurrentValue().ok()?;
+        let maximum = pattern.CurrentMaximum().ok()?;
+        if maximum <= 0.0 {
+            continue;
+        }
+
+        return Some(TimelineSample {
+            position_ms: (value.max(0.0) * 1000.0) as u64,
+            duration_ms: (maximum * 1000.0) as u64,
+        });
+    }
+
+    None
 }
 
 unsafe fn select_inner(hwnds: &[i64], title: &str, wanted: &str) -> Option<TabSelection> {
@@ -145,14 +227,16 @@ unsafe fn select_inner(hwnds: &[i64], title: &str, wanted: &str) -> Option<TabSe
     None
 }
 
-unsafe fn restore_inner(selection: &TabSelection) -> bool {
-    let current_title = window_title(selection.hwnd);
-    if !tab_matches(
-        &normalize_title(&current_title),
-        &normalize_title(&selection.media_title),
-    ) {
-        // The user changed tabs while the preview was open: keep their choice.
-        return false;
+unsafe fn restore_inner(selection: &TabSelection, force: bool) -> bool {
+    if !force {
+        let current_title = window_title(selection.hwnd);
+        if !tab_matches(
+            &normalize_title(&current_title),
+            &normalize_title(&selection.media_title),
+        ) {
+            // The user changed tabs while the preview was open: keep their choice.
+            return false;
+        }
     }
 
     let Some(automation) = automation() else {
@@ -257,6 +341,10 @@ fn word_overlap(a: &str, b: &str) -> usize {
     a.split_whitespace()
         .filter(|word| word.len() > 2 && words.contains(word))
         .count()
+}
+
+pub fn title_matches(a: &str, b: &str) -> bool {
+    tab_matches(a, b)
 }
 
 fn tab_matches(tab: &str, wanted: &str) -> bool {

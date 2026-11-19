@@ -117,6 +117,11 @@ export interface MediaAudio {
     muted: boolean;
 }
 
+export interface MediaTimeline {
+    positionMs: number;
+    durationMs: number;
+}
+
 export interface WifiNetwork {
     ssid: string;
     signal: number;

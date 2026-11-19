@@ -122,6 +122,7 @@ pub fn run() {
             commands::media_preview_start,
             commands::media_preview_stop,
             commands::media_audio,
+            commands::media_timeline,
             commands::set_media_volume,
             commands::set_media_muted,
             commands::media_control,

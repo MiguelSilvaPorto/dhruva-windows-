@@ -9,6 +9,7 @@ import type {
     MediaPreviewSession,
     MediaPreviewTab,
     MediaAudio,
+    MediaTimeline,
     SystemStatus,
     TrashIcon,
     WifiStatus,
@@ -34,6 +35,8 @@ export const api = {
     mediaPreviewStop: (selection: MediaPreviewTab) =>
         invoke<boolean>('media_preview_stop', { selection }),
     getMediaAudio: () => invoke<MediaAudio | null>('media_audio'),
+    getMediaTimeline: (allowSwitch = false) =>
+        invoke<MediaTimeline | null>('media_timeline', { allowSwitch }),
     setMediaVolume: (volume: number) =>
         invoke<void>('set_media_volume', { volume }),
     setMediaMuted: (muted: boolean) =>

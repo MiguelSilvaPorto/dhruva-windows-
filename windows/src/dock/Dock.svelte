@@ -126,7 +126,13 @@
     let mediaPanelEl = $state<HTMLDivElement | null>(null);
     let mediaPanelLeft = $state(0);
     let mediaPosition = $state(0);
-    let mediaSyncAt = 0;
+    let mediaBasePosition = 0;
+    let mediaBaseAt = 0;
+    let mediaRawPosition = -1;
+    let mediaSeekUntil = 0;
+    let mediaTimelineKey = '';
+    let mediaTimelineDuration = $state(0);
+    let mediaSyncing = $state(false);
     let mediaBusy = $state<string | null>(null);
     let mediaSeeking = $state(false);
     let mediaSourceIcon = $state<string | null>(null);
@@ -256,9 +262,15 @@
     const mediaVisible = $derived(
         !!media?.hasSession && !!media.title,
     );
+    const mediaDuration = $derived(
+        mediaTimelineDuration > 0
+            ? mediaTimelineDuration
+            : (media?.durationMs ?? 0),
+    );
+
     const mediaProgress = $derived(
-        media && media.durationMs > 0
-            ? Math.min(100, (mediaPosition / media.durationMs) * 100)
+        mediaDuration > 0
+            ? Math.min(100, (mediaPosition / mediaDuration) * 100)
             : 0,
     );
 
@@ -656,6 +668,14 @@
 
     $effect(() => {
         if (!mediaOpen) return;
+        const artKey = media?.artKey ?? '';
+        if (artKey === mediaTimelineKey) return;
+        mediaTimelineKey = artKey;
+        void syncMediaTimeline(false);
+    });
+
+    $effect(() => {
+        if (!mediaOpen) return;
         void refreshMediaVolume();
         const timer = setInterval(() => void refreshMediaVolume(), 1500);
         return () => clearInterval(timer);
@@ -799,10 +819,10 @@
             void refreshMedia();
         }, 1000);
         const mediaProgressTimer = setInterval(() => {
-            if (!media?.playing || !media.durationMs || mediaSeeking) return;
+            if (!media?.playing || !mediaDuration || mediaSeeking) return;
             mediaPosition = Math.min(
-                media.durationMs,
-                media.positionMs + (Date.now() - mediaSyncAt),
+                mediaDuration,
+                mediaBasePosition + (Date.now() - mediaBaseAt),
             );
         }, 250);
         const clockTimer = setInterval(() => {
@@ -2301,35 +2321,69 @@
     async function refreshMedia() {
         try {
             const status = await api.getMediaStatus();
+            const now = Date.now();
             const previous = mediaPosition;
+            const wasPlaying = media?.playing ?? false;
             const sameTrack =
                 media?.title === status.title &&
                 (media?.artist ?? '') === (status.artist ?? '');
-
-            // Windows' media bridge can report a position slightly behind
-            // the one already extrapolated locally. Keep the line moving
-            // forward instead of letting it visibly rewind every refresh.
-            if (
-                status.playing &&
-                media?.playing &&
-                !mediaSeeking &&
-                sameTrack &&
-                status.positionMs < previous &&
-                previous - status.positionMs < 8000
-            ) {
-                status.positionMs = previous;
-            }
+            const rawChanged = status.positionMs !== mediaRawPosition;
 
             media = status;
-            mediaPosition = status.positionMs;
-            mediaSyncAt = Date.now();
 
             if (!status.hasSession || !status.title) {
+                mediaRawPosition = -1;
+                mediaBasePosition = 0;
+                mediaBaseAt = now;
+                mediaPosition = 0;
+                mediaTimelineDuration = 0;
                 mediaArtKey = '';
                 mediaArt = null;
                 if (mediaOpen) closeMediaPanel();
                 return;
             }
+
+            if (!sameTrack) {
+                mediaTimelineDuration = 0;
+                mediaBasePosition = status.positionMs;
+                mediaBaseAt = now;
+                mediaPosition = status.positionMs;
+            } else if (mediaSeeking) {
+                // Keep the value the user is dragging.
+            } else if (now < mediaSeekUntil) {
+                // Trust the seek target until the player catches up.
+            } else if (!status.playing) {
+                if (rawChanged) {
+                    mediaBasePosition = status.positionMs;
+                    mediaBaseAt = now;
+                    mediaPosition = status.positionMs;
+                } else if (wasPlaying) {
+                    mediaBasePosition = previous;
+                    mediaBaseAt = now;
+                    mediaPosition = previous;
+                }
+            } else if (!wasPlaying) {
+                mediaBasePosition = rawChanged ? status.positionMs : previous;
+                mediaBaseAt = now;
+                mediaPosition = mediaBasePosition;
+            } else if (rawChanged) {
+                mediaBasePosition = status.positionMs;
+                mediaBaseAt = now;
+                mediaPosition = status.positionMs;
+            } else {
+                // Chrome often keeps the SMTC position frozen while playing.
+                // Keep the local clock instead of rewinding on every poll.
+                const duration =
+                    mediaTimelineDuration > 0
+                        ? mediaTimelineDuration
+                        : status.durationMs;
+                mediaPosition = Math.min(
+                    duration,
+                    mediaBasePosition + (now - mediaBaseAt),
+                );
+            }
+
+            mediaRawPosition = status.positionMs;
 
             if (status.artKey && status.artKey !== mediaArtKey) {
                 mediaArtKey = status.artKey;
@@ -2399,6 +2453,7 @@
             if (!mediaPinned) {
                 mediaPinned = true;
                 cancelMediaHoverClose();
+                void syncMediaTimeline(true);
                 return;
             }
             closeMediaPanel();
@@ -2416,6 +2471,7 @@
         clearTimeout(mediaHoverCloseTimer);
         mediaPinned = true;
         mediaOpen = true;
+        void syncMediaTimeline(true);
         void tick().then(() => sendRegion(true));
     }
 
@@ -2431,6 +2487,7 @@
         hideTooltipNow();
         mediaPinned = false;
         mediaOpen = true;
+        void syncMediaTimeline(false);
         void tick().then(() => sendRegion(hovering));
     }
 
@@ -2534,6 +2591,7 @@
 
         mediaPreviewHwnd = target.hwnd;
         mediaPreviewTab = target.tab;
+        setTimeout(() => void syncMediaTimeline(false), 500);
         mediaPreviewTimer = setTimeout(
             () => void captureMediaPreview(seq),
             220,
@@ -2639,18 +2697,71 @@
         }
     }
 
+    async function syncMediaTimeline(allowSwitch: boolean) {
+        if (!mediaOpen || !media || mediaSyncing) return;
+
+        mediaSyncing = true;
+        const key = media.artKey ?? '';
+        mediaTimelineKey = key;
+        try {
+            const sample = await api.getMediaTimeline(allowSwitch);
+            if (!mediaOpen || !sample || (media?.artKey ?? '') !== key) return;
+
+            mediaBasePosition = sample.positionMs;
+            mediaBaseAt = Date.now();
+            mediaPosition = sample.positionMs;
+            if (sample.durationMs > 0) mediaTimelineDuration = sample.durationMs;
+            mediaRawPosition = media.positionMs;
+            mediaSeekUntil = Date.now() + 1200;
+        } finally {
+            mediaSyncing = false;
+        }
+    }
+
+    function applySeekTarget(target: number) {
+        mediaPosition = target;
+        mediaBasePosition = target;
+        mediaBaseAt = Date.now();
+        mediaSeekUntil = Date.now() + 1500;
+    }
+
+    async function seekRelative(delta: number) {
+        if (!mediaDuration) return;
+
+        const target = Math.max(
+            0,
+            Math.min(mediaDuration, mediaPosition + delta),
+        );
+        applySeekTarget(target);
+
+        try {
+            await api.mediaControl('seek', target);
+            await new Promise(resolve => setTimeout(resolve, 300));
+            await refreshMedia();
+        } catch (error) {
+            console.error('media seek failed', error);
+        }
+    }
+
     function onMediaSeekInput(event: Event) {
         const value = Number((event.currentTarget as HTMLInputElement).value);
         mediaPosition = value;
+        mediaBasePosition = value;
+        mediaBaseAt = Date.now();
+        mediaSeekUntil = Date.now() + 1500;
         mediaSeeking = true;
     }
 
     async function onMediaSeekCommit(event: Event) {
         const value = Number((event.currentTarget as HTMLInputElement).value);
+        const previous = mediaPosition;
         mediaPosition = value;
+        mediaBasePosition = value;
+        mediaBaseAt = Date.now();
         mediaSeeking = false;
+        mediaSeekUntil = Date.now() + 1500;
 
-        if (!media?.canSeek) return;
+        if (!mediaDuration) return;
 
         try {
             await api.mediaControl('seek', value);
@@ -2658,6 +2769,10 @@
             await refreshMedia();
         } catch (error) {
             console.error('media seek failed', error);
+            mediaBasePosition = previous;
+            mediaBaseAt = Date.now();
+            mediaPosition = previous;
+            mediaSeekUntil = 0;
         }
     }
 
@@ -4047,9 +4162,9 @@
                 <input
                     type="range"
                     min="0"
-                    max={media.durationMs || 0}
+                    max={mediaDuration || 0}
                     value={Math.round(mediaPosition)}
-                    disabled={!media.canSeek || !media.durationMs}
+                    disabled={!mediaDuration}
                     oninput={onMediaSeekInput}
                     onchange={onMediaSeekCommit}
                     style={`--progress:${mediaProgress}%`}
@@ -4057,7 +4172,32 @@
                 />
                 <div class="media-times">
                     <span>{formatTime(mediaPosition)}</span>
-                    <span>{formatTime(media.durationMs)}</span>
+                    <span class="media-times-right">
+                        <span>{formatTime(mediaDuration)}</span>
+                        <button
+                            class="media-sync"
+                            class:is-busy={mediaSyncing}
+                            onclick={() => void syncMediaTimeline(true)}
+                            disabled={mediaSyncing}
+                            title="Sincronizar tempo com o vídeo"
+                            aria-label="Sincronizar tempo com o vídeo"
+                        >
+                            <svg
+                                viewBox="0 0 16 16"
+                                width="11"
+                                height="11"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path d="M13.2 6.2A5.4 5.4 0 1 0 13 10" />
+                                <path d="M13.4 2.8v3.6H9.8" />
+                            </svg>
+                        </button>
+                    </span>
                 </div>
             </div>
 
@@ -4136,6 +4276,15 @@
                 </button>
 
                 <button
+                    class="media-control media-skip"
+                    onclick={() => void seekRelative(-10000)}
+                    disabled={!mediaDuration}
+                    title="Voltar 10 segundos"
+                >
+                    -10
+                </button>
+
+                <button
                     class="media-control primary"
                     onclick={() => mediaAction('playPause')}
                     disabled={!media.canPlayPause || !!mediaBusy}
@@ -4163,6 +4312,15 @@
                             <path d="M8 4.6a1 1 0 0 1 1.5-.9l11 7.4a1 1 0 0 1 0 1.8l-11 7.4A1 1 0 0 1 8 19.4z" />
                         </svg>
                     {/if}
+                </button>
+
+                <button
+                    class="media-control media-skip"
+                    onclick={() => void seekRelative(10000)}
+                    disabled={!mediaDuration}
+                    title="Avançar 10 segundos"
+                >
+                    +10
                 </button>
 
                 <button
@@ -5883,11 +6041,51 @@
 
     .media-times {
         display: flex;
+        align-items: center;
         justify-content: space-between;
         margin-top: 5px;
         color: var(--text-dim);
         font-size: 9.5px;
         font-variant-numeric: tabular-nums;
+    }
+
+    .media-times-right {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+    }
+
+    .media-sync {
+        display: flex;
+        width: 16px;
+        height: 16px;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--text-dim);
+        cursor: pointer;
+    }
+
+    .media-sync:hover {
+        color: var(--text);
+    }
+
+    .media-sync:disabled {
+        cursor: default;
+        opacity: 0.5;
+    }
+
+    .media-sync.is-busy svg {
+        animation: media-sync-spin 800ms linear infinite;
+    }
+
+    @keyframes media-sync-spin {
+        to {
+            transform: rotate(360deg);
+        }
     }
 
     .media-volume {
@@ -6012,6 +6210,15 @@
         background: transparent;
         box-shadow: none;
         opacity: 0.3;
+    }
+
+    .media-control.media-skip {
+        width: 32px;
+        height: 32px;
+        font-size: 9.5px;
+        font-weight: 650;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: -0.02em;
     }
 
     .status-btn.background.is-active {

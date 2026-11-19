@@ -348,6 +348,16 @@ pub async fn media_audio() -> Option<win::audio::AudioState> {
 }
 
 #[tauri::command]
+pub async fn media_timeline(allow_switch: Option<bool>) -> Option<win::accessibility::TimelineSample> {
+    tauri::async_runtime::spawn_blocking(move || {
+        win::media::timeline(allow_switch.unwrap_or(false))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
 pub async fn set_media_volume(volume: f32) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || win::audio::set_volume(volume))
         .await

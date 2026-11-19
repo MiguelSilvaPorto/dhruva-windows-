@@ -233,6 +233,74 @@ pub fn preview_start() -> Option<PreviewSession> {
     })
 }
 
+fn validate_timeline(
+    sample: super::accessibility::TimelineSample,
+) -> Option<super::accessibility::TimelineSample> {
+    if sample.duration_ms == 0 || sample.position_ms > sample.duration_ms + 2000 {
+        return None;
+    }
+
+    Some(sample)
+}
+
+/// Reads the exact playback position from the browser's player. With
+/// `allow_switch`, briefly selects the media tab and restores the previous
+/// one; without it, only an already-active tab is read.
+pub fn timeline(allow_switch: bool) -> Option<super::accessibility::TimelineSample> {
+    let status = status();
+    let title = status.title?;
+    let app = status.app.unwrap_or_default();
+    if !is_browser(&app) {
+        return None;
+    }
+
+    let needle = exe_needle(&app);
+    let candidates: Vec<super::windows::WindowInfo> = super::windows::list()
+        .into_iter()
+        .filter(|window| !window.minimized)
+        .filter(|window| needle.is_empty() || window.exe.to_lowercase().contains(needle))
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let wanted = super::util::normalize_title(&title);
+    for window in &candidates {
+        let current = super::util::normalize_title(&super::accessibility::window_title(window.hwnd));
+        if !super::accessibility::title_matches(&current, &wanted) {
+            continue;
+        }
+        if let Some(sample) = super::accessibility::read_timeline(window.hwnd) {
+            return validate_timeline(sample);
+        }
+    }
+
+    if !allow_switch {
+        return None;
+    }
+
+    let hwnds: Vec<i64> = candidates.iter().map(|window| window.hwnd).collect();
+    let selection = super::accessibility::select_tab(&hwnds, &title)?;
+    if selection.switched {
+        let wanted = super::util::normalize_title(&title);
+        for _ in 0..15 {
+            let current =
+                super::util::normalize_title(&super::accessibility::window_title(selection.hwnd));
+            if super::accessibility::title_matches(&current, &wanted) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let sample = super::accessibility::read_timeline(selection.hwnd);
+    if selection.switched {
+        let _ = super::accessibility::restore_tab_force(&selection);
+    }
+
+    sample.and_then(validate_timeline)
+}
+
 pub fn status() -> MediaStatus {
     init_com();
     let Some(session) = session() else {

@@ -8,6 +8,7 @@
 <a href="https://github.com/narkagni/dhruva/releases"><img src="https://img.shields.io/github/v/release/narkagni/dhruva?style=flat-square" alt="Latest release"></a>
 <a href="https://extensions.gnome.org/extension/9495/dhruva/"><img src="https://img.shields.io/badge/dynamic/json?style=flat-square&color=orange&label=Downloads&query=%24.downloads&url=https%3A%2F%2Fextensions.gnome.org%2Fextension-query%2F%3Fsearch%3Ddhruva" alt="Downloads"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL_v3-blue.svg?style=flat-square" alt="GPL-3.0 license"></a>
+<a href="LICENSING.md"><img src="https://img.shields.io/badge/Windows_License-MIT_OR_Apache--2.0-green.svg?style=flat-square" alt="MIT OR Apache-2.0 license"></a>
 
 <p>
 <a href="https://extensions.gnome.org/extension/9495/dhruva/"><b>Install</b></a> &nbsp;·&nbsp;
@@ -18,6 +19,8 @@
 </p>
 
 </div>
+
+> **Port para Windows:** este repositório adiciona o **Dhruva Windows** em [`windows/`](windows/), licenciado sob **MIT OR Apache-2.0**. O projeto original é o **Dhruva** de **NarkAgni** — [GitHub](https://github.com/NarkAgni/dhruva) · [GNOME Extensions](https://extensions.gnome.org/extension/9495/dhruva/). A extensão GNOME original continua sob **GPL-3.0-or-later**; veja [`LICENSING.md`](LICENSING.md).
 
 Dhruva is a dock for GNOME Shell that you can shape the way you like. Keep it as a floating dock, stretch it edge to edge, or turn it into a full panel that holds your workspaces, tray, Quick Settings and clock, all in one bar.
 

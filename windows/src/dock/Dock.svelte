@@ -130,6 +130,10 @@
     let mediaBusy = $state<string | null>(null);
     let mediaSeeking = $state(false);
     let mediaSourceIcon = $state<string | null>(null);
+    let mediaVolume = $state<number | null>(null);
+    let mediaMuted = $state(false);
+    let mediaVolumeSyncAt = 0;
+    let mediaVolumeApplyTimer: ReturnType<typeof setTimeout> | undefined;
     let mediaPreviewOpen = $state(false);
     let mediaPreviewFrame = $state<string | null>(null);
     let mediaPreviewResolving = $state(false);
@@ -648,6 +652,13 @@
         const artKey = media?.artKey ?? '';
         if (artKey === mediaPreviewArtKey) return;
         void resolveMediaPreview();
+    });
+
+    $effect(() => {
+        if (!mediaOpen) return;
+        void refreshMediaVolume();
+        const timer = setInterval(() => void refreshMediaVolume(), 1500);
+        return () => clearInterval(timer);
     });
 
     $effect(() => {
@@ -2574,6 +2585,45 @@
         if (hwnd != null) void focusWindow(hwnd);
     }
 
+    async function refreshMediaVolume() {
+        if (Date.now() - mediaVolumeSyncAt < 1000) return;
+        const audio = await api.getMediaAudio().catch(() => null);
+        if (!mediaOpen || Date.now() - mediaVolumeSyncAt < 1000) return;
+        mediaVolume = audio ? audio.volume : null;
+        mediaMuted = audio ? audio.muted : false;
+    }
+
+    function onMediaVolumeInput(event: Event) {
+        const value = Number((event.currentTarget as HTMLInputElement).value);
+        const level = value / 100;
+        mediaVolume = level;
+        mediaVolumeSyncAt = Date.now();
+
+        if (level > 0 && mediaMuted) {
+            mediaMuted = false;
+            void api.setMediaMuted(false).catch(() => {});
+        }
+
+        clearTimeout(mediaVolumeApplyTimer);
+        mediaVolumeApplyTimer = setTimeout(() => {
+            void api.setMediaVolume(level).catch(() => {});
+        }, 70);
+    }
+
+    function onMediaVolumeCommit() {
+        if (mediaVolume == null) return;
+        mediaVolumeSyncAt = Date.now();
+        clearTimeout(mediaVolumeApplyTimer);
+        void api.setMediaVolume(mediaVolume).catch(() => {});
+    }
+
+    function toggleMediaMute() {
+        if (mediaVolume == null) return;
+        mediaMuted = !mediaMuted;
+        mediaVolumeSyncAt = Date.now();
+        void api.setMediaMuted(mediaMuted).catch(() => {});
+    }
+
     async function mediaAction(action: string) {
         if (mediaBusy) return;
         mediaBusy = action;
@@ -4009,6 +4059,61 @@
                     <span>{formatTime(mediaPosition)}</span>
                     <span>{formatTime(media.durationMs)}</span>
                 </div>
+            </div>
+
+            <div class="media-volume" class:is-muted={mediaMuted}>
+                <button
+                    class="media-volume-button"
+                    onclick={toggleMediaMute}
+                    disabled={mediaVolume == null}
+                    title={mediaVolume == null
+                        ? 'Áudio indisponível'
+                        : mediaMuted
+                          ? 'Ativar som'
+                          : 'Silenciar'}
+                    aria-label={mediaMuted ? 'Ativar som' : 'Silenciar'}
+                >
+                    <svg
+                        viewBox="0 0 24 24"
+                        width="17"
+                        height="17"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path
+                            d="M4 9.5h3.2L12 5.6v12.8l-4.8-3.9H4z"
+                            fill="currentColor"
+                            stroke="none"
+                        />
+                        {#if mediaMuted}
+                            <path d="M15.8 9.4l4.4 5.2M20.2 9.4l-4.4 5.2" />
+                        {:else}
+                            <path d="M15.2 9.3a4.1 4.1 0 0 1 0 5.4" />
+                            <path d="M17.8 6.9a7.7 7.7 0 0 1 0 10.2" />
+                        {/if}
+                    </svg>
+                </button>
+
+                <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={Math.round((mediaVolume ?? 0) * 100)}
+                    disabled={mediaVolume == null}
+                    oninput={onMediaVolumeInput}
+                    onchange={onMediaVolumeCommit}
+                    style={`--volume:${(mediaVolume ?? 0) * 100}%`}
+                    aria-label="Volume do aplicativo"
+                />
+
+                <span class="media-volume-value">
+                    {mediaVolume == null ? '—' : Math.round(mediaVolume * 100)}
+                </span>
             </div>
 
             <div class="media-controls">
@@ -5783,6 +5888,82 @@
         color: var(--text-dim);
         font-size: 9.5px;
         font-variant-numeric: tabular-nums;
+    }
+
+    .media-volume {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 2px 0;
+    }
+
+    .media-volume-button {
+        display: flex;
+        width: 24px;
+        height: 24px;
+        flex: none;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--text-dim);
+        cursor: pointer;
+        transition:
+            color var(--anim-duration, 140ms) ease,
+            background var(--anim-duration, 140ms) ease;
+    }
+
+    .media-volume-button:not(:disabled):hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.08);
+    }
+
+    .media-volume-button:disabled {
+        cursor: default;
+        opacity: 0.45;
+    }
+
+    .media-volume input[type='range'] {
+        width: 100%;
+        height: 3px;
+        flex: 1;
+        margin: 0;
+        appearance: none;
+        -webkit-appearance: none;
+        border-radius: 999px;
+        background: linear-gradient(
+            to right,
+            var(--accent) var(--volume, 0%),
+            var(--sep) var(--volume, 0%)
+        );
+        outline: none;
+        cursor: default;
+    }
+
+    .media-volume input[type='range']::-webkit-slider-thumb {
+        width: 9px;
+        height: 9px;
+        appearance: none;
+        -webkit-appearance: none;
+        border: 0;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+    }
+
+    .media-volume input[type='range']:disabled {
+        opacity: 0.45;
+    }
+
+    .media-volume-value {
+        width: 22px;
+        flex: none;
+        color: var(--text-dim);
+        font-size: 9px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
     }
 
     .media-controls {

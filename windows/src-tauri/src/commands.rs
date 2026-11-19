@@ -340,6 +340,28 @@ pub async fn media_preview_stop(selection: win::accessibility::TabSelection) -> 
 }
 
 #[tauri::command]
+pub async fn media_audio() -> Option<win::audio::AudioState> {
+    tauri::async_runtime::spawn_blocking(win::audio::state)
+        .await
+        .ok()
+        .flatten()
+}
+
+#[tauri::command]
+pub async fn set_media_volume(volume: f32) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || win::audio::set_volume(volume))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_media_muted(muted: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || win::audio::set_muted(muted))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub fn media_control(action: String, position_ms: Option<u64>) -> Result<(), String> {
     win::media::control(&action, position_ms)
 }

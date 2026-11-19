@@ -112,6 +112,11 @@ export interface MediaPreviewSession {
     tab: MediaPreviewTab | null;
 }
 
+export interface MediaAudio {
+    volume: number;
+    muted: boolean;
+}
+
 export interface WifiNetwork {
     ssid: string;
     signal: number;

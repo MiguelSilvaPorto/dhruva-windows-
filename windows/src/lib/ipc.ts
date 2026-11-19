@@ -8,6 +8,7 @@ import type {
     MediaStatus,
     MediaPreviewSession,
     MediaPreviewTab,
+    MediaAudio,
     SystemStatus,
     TrashIcon,
     WifiStatus,
@@ -32,6 +33,11 @@ export const api = {
         invoke<MediaPreviewSession | null>('media_preview_start'),
     mediaPreviewStop: (selection: MediaPreviewTab) =>
         invoke<boolean>('media_preview_stop', { selection }),
+    getMediaAudio: () => invoke<MediaAudio | null>('media_audio'),
+    setMediaVolume: (volume: number) =>
+        invoke<void>('set_media_volume', { volume }),
+    setMediaMuted: (muted: boolean) =>
+        invoke<void>('set_media_muted', { muted }),
     mediaControl: (action: string, positionMs?: number) =>
         invoke<void>('media_control', {
             action,

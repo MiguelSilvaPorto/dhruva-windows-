@@ -125,6 +125,114 @@ fn ticks_to_ms(ticks: i64) -> u64 {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSession {
+    pub hwnd: i64,
+    pub title: String,
+    pub tab: Option<super::accessibility::TabSelection>,
+}
+
+fn exe_needle(app: &str) -> &'static str {
+    let lower = app.to_lowercase();
+    if lower.contains("chrome") || lower.contains("youtube") {
+        "chrome"
+    } else if lower.contains("edge") {
+        "msedge"
+    } else if lower.contains("firefox") {
+        "firefox"
+    } else if lower.contains("brave") {
+        "brave"
+    } else if lower.contains("opera") {
+        "opera"
+    } else if lower.contains("vlc") {
+        "vlc"
+    } else if lower.contains("media player") {
+        "wmplayer"
+    } else {
+        ""
+    }
+}
+
+fn is_browser(app: &str) -> bool {
+    let lower = app.to_lowercase();
+    ["chrome", "edge", "firefox", "brave", "opera", "youtube"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn best_title_window<'a>(
+    candidates: &'a [super::windows::WindowInfo],
+    title: &str,
+) -> Option<&'a super::windows::WindowInfo> {
+    let wanted = super::util::normalize_title(title);
+    let mut best: Option<(&super::windows::WindowInfo, usize)> = None;
+
+    for window in candidates {
+        let candidate = super::util::normalize_title(&window.title);
+        if candidate.is_empty() {
+            continue;
+        }
+
+        let score = if candidate.contains(&wanted) {
+            3
+        } else if wanted.contains(&candidate) && candidate.len() >= 16 {
+            2
+        } else if candidate.contains("youtube") {
+            1
+        } else {
+            0
+        };
+
+        if score > 0 && best.map(|(_, current)| score > current).unwrap_or(true) {
+            best = Some((window, score));
+        }
+    }
+
+    best.map(|(window, _)| window)
+}
+
+/// Starts a live preview session: finds the window that owns the current
+/// media, selects its matching tab when it is a browser, and reports the
+/// previous tab so closing the preview can restore it.
+pub fn preview_start() -> Option<PreviewSession> {
+    let status = status();
+    let title = status.title?;
+    let app = status.app.unwrap_or_default();
+    let needle = exe_needle(&app);
+
+    let mut candidates: Vec<super::windows::WindowInfo> = super::windows::list()
+        .into_iter()
+        .filter(|window| !window.minimized)
+        .filter(|window| needle.is_empty() || window.exe.to_lowercase().contains(needle))
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by_key(|window| !window.focused);
+
+    if is_browser(&app) {
+        let hwnds: Vec<i64> = candidates.iter().map(|window| window.hwnd).collect();
+        if let Some(tab) = super::accessibility::select_tab(&hwnds, &title) {
+            let window = candidates.iter().find(|window| window.hwnd == tab.hwnd)?;
+            return Some(PreviewSession {
+                hwnd: tab.hwnd,
+                title: window.title.clone(),
+                tab: Some(tab),
+            });
+        }
+    }
+
+    let window = best_title_window(&candidates, &title)?;
+    Some(PreviewSession {
+        hwnd: window.hwnd,
+        title: window.title.clone(),
+        tab: None,
+    })
+}
+
 pub fn status() -> MediaStatus {
     init_com();
     let Some(session) = session() else {

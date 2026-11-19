@@ -10,6 +10,7 @@
 - Licenciamento duplo **MIT OR Apache-2.0** para o port Windows.
 - `AGENTS.md` com o fluxo de trabalho em worktrees, validação e convenções.
 - Launcher com busca em janelas abertas, previews de mídia compactos e pastas na dock.
+- Prévia ao vivo da mídia: clicar na capa abre um quadro ao vivo do vídeo; em navegadores, a aba correspondente é ativada e restaurada ao fechar.
 
 ### Corrigido
 

@@ -257,6 +257,21 @@ pub async fn window_preview(hwnd: i64, width: u32, height: u32) -> Option<String
 }
 
 #[tauri::command]
+pub async fn window_preview_jpeg(hwnd: i64, width: u32, height: u32) -> Option<String> {
+    // The lock screen suspends window painting; frames would be blank.
+    if win::windows::session_is_locked() {
+        return None;
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        win::preview::capture_jpeg(hwnd, width, height)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
 pub async fn pick_folder() -> Option<String> {
     tauri::async_runtime::spawn_blocking(win::shell::pick_folder)
         .await
@@ -306,6 +321,22 @@ pub fn media_status() -> win::media::MediaStatus {
 #[tauri::command]
 pub fn media_art() -> Option<String> {
     win::media::art()
+}
+
+#[tauri::command]
+pub async fn media_preview_start() -> Option<win::media::PreviewSession> {
+    tauri::async_runtime::spawn_blocking(win::media::preview_start)
+        .await
+        .ok()
+        .flatten()
+}
+
+#[tauri::command]
+pub async fn media_preview_stop(selection: win::accessibility::TabSelection) -> bool {
+    tauri::async_runtime::spawn_blocking(move || win::accessibility::restore_tab(&selection))
+        .await
+        .ok()
+        .unwrap_or(false)
 }
 
 #[tauri::command]

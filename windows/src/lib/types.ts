@@ -99,6 +99,19 @@ export interface MediaStatus {
     canSeek: boolean;
 }
 
+export interface MediaPreviewTab {
+    hwnd: number;
+    mediaTitle: string;
+    previousTitle: string;
+    switched: boolean;
+}
+
+export interface MediaPreviewSession {
+    hwnd: number;
+    title: string;
+    tab: MediaPreviewTab | null;
+}
+
 export interface WifiNetwork {
     ssid: string;
     signal: number;

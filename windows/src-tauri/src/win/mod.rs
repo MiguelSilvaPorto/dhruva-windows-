@@ -10,6 +10,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 };
 
 pub mod appbar;
+pub mod accessibility;
 pub mod hotkey;
 pub mod media;
 pub mod preview;

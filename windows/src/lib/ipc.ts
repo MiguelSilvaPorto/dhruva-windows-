@@ -6,6 +6,8 @@ import type {
     DockRect,
     Settings,
     MediaStatus,
+    MediaPreviewSession,
+    MediaPreviewTab,
     SystemStatus,
     TrashIcon,
     WifiStatus,
@@ -26,6 +28,10 @@ export const api = {
         invoke<void>('background_terminate', { pid }),
     getMediaStatus: () => invoke<MediaStatus>('media_status'),
     getMediaArt: () => invoke<string | null>('media_art'),
+    mediaPreviewStart: () =>
+        invoke<MediaPreviewSession | null>('media_preview_start'),
+    mediaPreviewStop: (selection: MediaPreviewTab) =>
+        invoke<boolean>('media_preview_stop', { selection }),
     mediaControl: (action: string, positionMs?: number) =>
         invoke<void>('media_control', {
             action,
@@ -67,6 +73,8 @@ export const api = {
     listWindows: () => invoke<WindowInfo[]>('list_windows'),
     windowPreview: (hwnd: number, width: number, height: number) =>
         invoke<string | null>('window_preview', { hwnd, width, height }),
+    windowPreviewJpeg: (hwnd: number, width: number, height: number) =>
+        invoke<string | null>('window_preview_jpeg', { hwnd, width, height }),
     openTrash: () => invoke<void>('open_trash'),
     emptyTrash: () => invoke<void>('empty_trash'),
     saveSettings: (settings: Settings) =>

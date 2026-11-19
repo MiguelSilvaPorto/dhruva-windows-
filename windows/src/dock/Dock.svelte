@@ -18,6 +18,7 @@
         AppEntry,
         BackgroundApp,
         MediaStatus,
+        MediaPreviewTab,
         Settings,
         TrashIcon,
         WifiNetwork,
@@ -129,6 +130,15 @@
     let mediaBusy = $state<string | null>(null);
     let mediaSeeking = $state(false);
     let mediaSourceIcon = $state<string | null>(null);
+    let mediaPreviewOpen = $state(false);
+    let mediaPreviewFrame = $state<string | null>(null);
+    let mediaPreviewResolving = $state(false);
+    let mediaPreviewMissing = $state(false);
+    let mediaPreviewHwnd: number | null = null;
+    let mediaPreviewTab: MediaPreviewTab | null = null;
+    let mediaPreviewArtKey = '';
+    let mediaPreviewSeq = 0;
+    let mediaPreviewTimer: ReturnType<typeof setTimeout> | undefined;
     let mediaHoverTimer: ReturnType<typeof setTimeout> | undefined;
     let mediaHoverCloseTimer: ReturnType<typeof setTimeout> | undefined;
     let mediaPanelHover = false;
@@ -247,6 +257,7 @@
             ? Math.min(100, (mediaPosition / media.durationMs) * 100)
             : 0,
     );
+
 
     function signalLevel(signal: number): number {
         if (signal >= 75) return 4;
@@ -628,7 +639,15 @@
         mediaArt;
         media?.title;
         media?.album;
+        mediaPreviewOpen;
         void tick().then(() => sendRegion(true));
+    });
+
+    $effect(() => {
+        if (!mediaPreviewOpen) return;
+        const artKey = media?.artKey ?? '';
+        if (artKey === mediaPreviewArtKey) return;
+        void resolveMediaPreview();
     });
 
     $effect(() => {
@@ -2442,7 +2461,8 @@
         if (!mediaPinned) scheduleMediaHoverClose();
     }
 
-    function closeMediaPanel() {
+    function closeMediaPanel(skipPreviewRestore = false) {
+        stopMediaPreview(!skipPreviewRestore);
         clearTimeout(mediaHoverTimer);
         clearTimeout(mediaHoverCloseTimer);
         mediaPinned = false;
@@ -2450,6 +2470,108 @@
         if (!mediaOpen) return;
         mediaOpen = false;
         scheduleRegion(hovering);
+    }
+
+    async function captureMediaPreview(seq: number) {
+        if (!mediaPreviewOpen || seq !== mediaPreviewSeq || mediaPreviewHwnd == null) {
+            return;
+        }
+
+        const hwnd = mediaPreviewHwnd;
+        try {
+            const frame = await api.windowPreviewJpeg(hwnd, 328, 185);
+            if (seq === mediaPreviewSeq && mediaPreviewOpen && frame) {
+                mediaPreviewFrame = frame;
+            }
+        } catch {
+            // A frame may fail while the window is being resized or redrawn.
+        }
+
+        if (seq === mediaPreviewSeq && mediaPreviewOpen && mediaPreviewHwnd != null) {
+            mediaPreviewTimer = setTimeout(
+                () => void captureMediaPreview(seq),
+                110,
+            );
+        }
+    }
+
+    async function resolveMediaPreview() {
+        const seq = ++mediaPreviewSeq;
+        mediaPreviewArtKey = media?.artKey ?? '';
+        mediaPreviewFrame = null;
+        mediaPreviewHwnd = null;
+        mediaPreviewMissing = false;
+        mediaPreviewResolving = true;
+        void tick().then(() => sendRegion(true));
+
+        await restoreMediaPreviewTab();
+        if (seq !== mediaPreviewSeq || !mediaPreviewOpen) return;
+
+        const target = await api.mediaPreviewStart().catch(() => null);
+        if (seq !== mediaPreviewSeq || !mediaPreviewOpen) {
+            if (target?.tab) {
+                void api.mediaPreviewStop(target.tab).catch(() => false);
+            }
+            return;
+        }
+
+        mediaPreviewResolving = false;
+        if (!target) {
+            mediaPreviewMissing = true;
+            return;
+        }
+
+        mediaPreviewHwnd = target.hwnd;
+        mediaPreviewTab = target.tab;
+        mediaPreviewTimer = setTimeout(
+            () => void captureMediaPreview(seq),
+            220,
+        );
+    }
+
+    async function restoreMediaPreviewTab() {
+        const tab = mediaPreviewTab;
+        mediaPreviewTab = null;
+        if (tab) {
+            await api.mediaPreviewStop(tab).catch(() => false);
+        }
+    }
+
+    function toggleMediaPreview() {
+        if (mediaPreviewOpen) {
+            stopMediaPreview();
+            return;
+        }
+
+        mediaPinned = true;
+        cancelMediaHoverClose();
+        mediaPreviewOpen = true;
+        void resolveMediaPreview();
+    }
+
+    function stopMediaPreview(restore = true) {
+        if (restore) {
+            void restoreMediaPreviewTab();
+        } else {
+            mediaPreviewTab = null;
+        }
+
+        if (mediaPreviewTimer) clearTimeout(mediaPreviewTimer);
+        mediaPreviewTimer = undefined;
+        mediaPreviewSeq++;
+        mediaPreviewOpen = false;
+        mediaPreviewResolving = false;
+        mediaPreviewMissing = false;
+        mediaPreviewFrame = null;
+        mediaPreviewHwnd = null;
+        mediaPreviewArtKey = '';
+        void tick().then(() => sendRegion(true));
+    }
+
+    function openMediaPreviewWindow() {
+        const hwnd = mediaPreviewHwnd;
+        closeMediaPanel(true);
+        if (hwnd != null) void focusWindow(hwnd);
     }
 
     async function mediaAction(action: string) {
@@ -3735,7 +3857,7 @@
         {#if mediaPinned}
             <div
                 class="media-backdrop"
-                onclick={closeMediaPanel}
+                onclick={() => closeMediaPanel()}
                 oncontextmenu={event => {
                     event.preventDefault();
                     closeMediaPanel();
@@ -3758,7 +3880,18 @@
             {/if}
 
             <div class="media-top">
-                <div class="media-cover">
+                <button
+                    class="media-cover"
+                    class:is-live={mediaPreviewOpen}
+                    onclick={toggleMediaPreview}
+                    disabled={!media?.hasSession}
+                    title={mediaPreviewOpen
+                        ? 'Fechar prévia ao vivo'
+                        : 'Ver prévia ao vivo'}
+                    aria-label={mediaPreviewOpen
+                        ? 'Fechar prévia ao vivo'
+                        : 'Ver prévia ao vivo'}
+                >
                     {#if mediaArt}
                         <img src={mediaArt} alt="" draggable="false" />
                     {:else}
@@ -3778,7 +3911,19 @@
                             <circle cx="16.5" cy="16" r="2.5" />
                         </svg>
                     {/if}
-                </div>
+                    {#if !mediaPreviewOpen}
+                        <span class="media-cover-live" aria-hidden="true">
+                            <svg
+                                viewBox="0 0 16 16"
+                                width="10"
+                                height="10"
+                                fill="currentColor"
+                            >
+                                <path d="M5.2 3.4v9.2L12.6 8z" />
+                            </svg>
+                        </span>
+                    {/if}
+                </button>
 
                 <div class="media-info">
                     <span class="media-app">
@@ -3796,7 +3941,7 @@
 
                 <button
                     class="icon-button media-hide"
-                    onclick={closeMediaPanel}
+                    onclick={() => closeMediaPanel()}
                     title="Fechar"
                 >
                     <svg
@@ -3813,6 +3958,40 @@
                     </svg>
                 </button>
             </div>
+
+            {#if mediaPreviewOpen}
+                <div class="media-live">
+                    {#if mediaPreviewFrame}
+                        <button
+                            class="media-live-frame"
+                            onclick={openMediaPreviewWindow}
+                            title="Abrir no {media.app ?? 'aplicativo'}"
+                        >
+                            <img
+                                src={mediaPreviewFrame}
+                                alt="Prévia ao vivo"
+                                draggable="false"
+                            />
+                            <span class="media-live-badge">
+                                <span class="media-live-dot"></span>
+                                AO VIVO
+                            </span>
+                        </button>
+                    {:else if mediaPreviewResolving}
+                        <div class="media-live-empty">
+                            Procurando a janela do vídeo…
+                        </div>
+                    {:else if mediaPreviewMissing}
+                        <div class="media-live-empty">
+                            Não encontrei a janela do vídeo.
+                        </div>
+                    {:else}
+                        <div class="media-live-empty">
+                            Conectando à janela do vídeo…
+                        </div>
+                    {/if}
+                </div>
+            {/if}
 
             <div class="media-progress">
                 <input
@@ -5386,6 +5565,7 @@
     }
 
     .media-cover {
+        position: relative;
         display: flex;
         width: 78px;
         height: 78px;
@@ -5393,10 +5573,48 @@
         align-items: center;
         justify-content: center;
         overflow: hidden;
+        padding: 0;
+        border: 0;
+        appearance: none;
         border-radius: 14px;
         background: linear-gradient(150deg, #4b5fd6, #232a5c);
         color: rgba(255, 255, 255, 0.85);
         box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3);
+        cursor: pointer;
+        font: inherit;
+        transition:
+            transform 140ms ease,
+            box-shadow 140ms ease;
+    }
+
+    .media-cover:disabled {
+        cursor: default;
+    }
+
+    .media-cover:not(:disabled):hover {
+        transform: translateY(-1px) scale(1.02);
+    }
+
+    .media-cover.is-live {
+        box-shadow:
+            0 0 0 2px var(--accent),
+            0 10px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    .media-cover-live {
+        position: absolute;
+        right: 4px;
+        bottom: 4px;
+        display: flex;
+        width: 20px;
+        height: 20px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.62);
+        color: #fff;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+        pointer-events: none;
     }
 
     .media-cover img {
@@ -5404,6 +5622,69 @@
         width: 100%;
         height: 100%;
         object-fit: cover;
+    }
+
+    .media-live {
+        margin-bottom: 12px;
+    }
+
+    .media-live-frame {
+        position: relative;
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        overflow: hidden;
+        padding: 0;
+        border: 1px solid var(--glass-border);
+        border-radius: 12px;
+        background: #000;
+        cursor: pointer;
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+    }
+
+    .media-live-frame img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+
+    .media-live-badge {
+        position: absolute;
+        top: 7px;
+        left: 7px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 7px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.62);
+        color: #fff;
+        font-size: 8px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        backdrop-filter: blur(4px);
+    }
+
+    .media-live-dot {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #ff4d4f;
+        box-shadow: 0 0 6px #ff4d4f;
+    }
+
+    .media-live-empty {
+        display: flex;
+        height: 185px;
+        align-items: center;
+        justify-content: center;
+        padding: 12px;
+        border: 1px dashed var(--glass-border);
+        border-radius: 12px;
+        color: var(--text-dim);
+        font-size: 11px;
+        text-align: center;
     }
 
     .media-info {

@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use image::codecs::jpeg::JpegEncoder;
 use image::{imageops::FilterType, DynamicImage, ImageFormat, RgbaImage};
 use std::ffi::c_void;
 use std::io::Cursor;
@@ -17,14 +18,24 @@ use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic};
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(1600);
 
 pub fn capture(hwnd: i64, max_width: u32, max_height: u32) -> Option<String> {
+    capture_with(hwnd, max_width, max_height, false)
+}
+
+/// Compact frame for the live media preview; JPEG keeps the IPC payload small
+/// enough to stream a few frames per second.
+pub fn capture_jpeg(hwnd: i64, max_width: u32, max_height: u32) -> Option<String> {
+    capture_with(hwnd, max_width, max_height, true)
+}
+
+fn capture_with(hwnd: i64, max_width: u32, max_height: u32, jpeg: bool) -> Option<String> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = sender.send(capture_inner(hwnd, max_width, max_height));
+        let _ = sender.send(capture_inner(hwnd, max_width, max_height, jpeg));
     });
     receiver.recv_timeout(CAPTURE_TIMEOUT).ok().flatten()
 }
 
-fn capture_inner(hwnd: i64, max_width: u32, max_height: u32) -> Option<String> {
+fn capture_inner(hwnd: i64, max_width: u32, max_height: u32, jpeg: bool) -> Option<String> {
     unsafe {
         let hwnd = HWND(hwnd as *mut c_void);
         if hwnd.is_invalid() || IsIconic(hwnd).as_bool() {
@@ -66,6 +77,7 @@ fn capture_inner(hwnd: i64, max_width: u32, max_height: u32) -> Option<String> {
                 window_rect,
                 max_width,
                 max_height,
+                jpeg,
             )
         } else {
             None
@@ -90,6 +102,7 @@ fn read_pixels(
     window_rect: RECT,
     max_width: u32,
     max_height: u32,
+    jpeg: bool,
 ) -> Option<String> {
     unsafe {
         let mut info = BITMAPINFO::default();
@@ -159,6 +172,16 @@ fn read_pixels(
 
         let resized =
             DynamicImage::ImageRgba8(image).resize(target_width, target_height, FilterType::Triangle);
+
+        if jpeg {
+            let mut output = Cursor::new(Vec::new());
+            let encoder = JpegEncoder::new_with_quality(&mut output, 72);
+            resized.write_with_encoder(encoder).ok()?;
+            return Some(format!(
+                "data:image/jpeg;base64,{}",
+                STANDARD.encode(output.into_inner())
+            ));
+        }
 
         let mut png = Cursor::new(Vec::new());
         resized.write_to(&mut png, ImageFormat::Png).ok()?;

@@ -1,7 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 use windows::core::{BOOL, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
@@ -20,8 +20,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static WIN_DOWN: AtomicBool = AtomicBool::new(false);
+static WIN_DOWN_AT: AtomicU64 = AtomicU64::new(0);
 static COMBO: AtomicBool = AtomicBool::new(false);
 static CHORD_INTENT: AtomicBool = AtomicBool::new(false);
+
+/// A Win key-up lost to a focus change or a stuck key would make every later
+/// key look like a Win chord and freeze normal typing. The state is dropped
+/// after this long without a Win-up.
+const WIN_STICKY_MS: u64 = 1500;
 
 /// Launcher toggles run one at a time, in press order. Spawning a thread per
 /// key-up lets two quick taps both read the same visibility state, which
@@ -71,6 +77,26 @@ fn request_launcher(request: LauncherRequest) {
     }
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn reset_win_state() {
+    WIN_DOWN.store(false, Ordering::SeqCst);
+    WIN_DOWN_AT.store(0, Ordering::SeqCst);
+    COMBO.store(false, Ordering::SeqCst);
+    CHORD_INTENT.store(false, Ordering::SeqCst);
+    let _ = clear_pending();
+}
+
+fn win_state_is_stale() -> bool {
+    WIN_DOWN.load(Ordering::SeqCst)
+        && now_ms().saturating_sub(WIN_DOWN_AT.load(Ordering::SeqCst)) > WIN_STICKY_MS
+}
+
 fn clear_pending() -> bool {
     PENDING_MODS
         .lock()
@@ -95,13 +121,11 @@ unsafe extern "system" fn keyboard_hook(
         let extended = info.flags.0 & LLKHF_EXTENDED.0 != 0;
         let message = wparam.0 as u32;
 
-        // Synthetic events we injected ourselves (the Win-down/key-down/
-        // Win-up pair for a chord) must reach Windows untouched. Events
-        // injected by other tools are treated as real input, so a scripted
-        // Windows key also opens Dhruva instead of the native Start menu.
-        if info.flags.0 & LLKHF_INJECTED.0 != 0
-            && info.dwExtraInfo == DHURVA_INJECTED
-        {
+        // Synthetic events (the Win-down/key-down/Win-up pair we send for a
+        // chord, and the Escape that dismisses a shell flyout) must reach
+        // Windows untouched. Only the physical keyboard drives the state
+        // machine; injected input from automation never gets stuck here.
+        if info.flags.0 & LLKHF_INJECTED.0 != 0 {
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
@@ -111,6 +135,7 @@ unsafe extern "system" fn keyboard_hook(
                     // Windows must never see the physical Windows key. It is
                     // only replayed as a full chord when another key follows.
                     if !WIN_DOWN.swap(true, Ordering::SeqCst) {
+                        WIN_DOWN_AT.store(now_ms(), Ordering::SeqCst);
                         COMBO.store(false, Ordering::SeqCst);
                         CHORD_INTENT.store(false, Ordering::SeqCst);
                         let _ = clear_pending();
@@ -119,6 +144,14 @@ unsafe extern "system" fn keyboard_hook(
                 }
 
                 if !WIN_DOWN.load(Ordering::SeqCst) {
+                    return CallNextHookEx(None, code, wparam, lparam);
+                }
+
+                // Recover from a Win key-up that was lost (focus change,
+                // session lock, another hook). Without this, every later key
+                // would be replayed as a Win chord and typing would freeze.
+                if win_state_is_stale() {
+                    reset_win_state();
                     return CallNextHookEx(None, code, wparam, lparam);
                 }
 
@@ -187,10 +220,11 @@ unsafe extern "system" fn keyboard_hook(
             }
             WM_KEYUP | WM_SYSKEYUP => {
                 if is_win {
-                    WIN_DOWN.store(false, Ordering::SeqCst);
                     let combo = COMBO.swap(false, Ordering::SeqCst);
                     let intent = CHORD_INTENT.swap(false, Ordering::SeqCst);
                     let had_pending = clear_pending();
+                    WIN_DOWN.store(false, Ordering::SeqCst);
+                    WIN_DOWN_AT.store(0, Ordering::SeqCst);
 
                     if !combo && !intent && !had_pending {
                         request_launcher(LauncherRequest::Toggle);
@@ -364,18 +398,32 @@ pub fn install(app: AppHandle) {
     let launcher_app = app.clone();
     std::thread::spawn(move || {
         while let Ok(request) = launcher_rx.recv() {
-            match request {
+            // Window visibility and foreground changes must run on the Tauri
+            // main thread; doing them from this worker makes the focus
+            // hand-off fail and lets the shell keep a hidden Start/Search
+            // window as the foreground.
+            let app = launcher_app.clone();
+            let _ = launcher_app.run_on_main_thread(move || match request {
                 LauncherRequest::Toggle => {
-                    crate::commands::toggle_launcher_cursor(&launcher_app);
+                    crate::commands::toggle_launcher_cursor(&app);
                 }
                 LauncherRequest::Open => {
-                    crate::commands::open_launcher_cursor(&launcher_app);
+                    crate::commands::open_launcher_cursor(&app);
                 }
-            }
+            });
         }
     });
 
     close_start_menu_forever();
+
+    // If a Win key-up never arrives, release the state even with no further
+    // input, so the keyboard is never left in "Win is held" mode.
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_millis(250));
+        if win_state_is_stale() {
+            reset_win_state();
+        }
+    });
 
     std::thread::spawn(|| unsafe {
         let hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0) {

@@ -73,6 +73,7 @@ pub fn run() {
 
             start_theme_poller(handle.clone());
             start_window_poller(handle.clone());
+            start_foreground_watcher();
             start_taskbar_watcher(handle.clone());
             start_session_watcher(handle.clone());
             start_outside_click_watcher(handle.clone());
@@ -341,6 +342,13 @@ fn start_window_poller(app: tauri::AppHandle) {
             ticks = ticks.wrapping_add(1);
             std::thread::sleep(Duration::from_millis(700));
         }
+    });
+}
+
+fn start_foreground_watcher() {
+    std::thread::spawn(|| loop {
+        commands::remember_foreground();
+        std::thread::sleep(Duration::from_millis(400));
     });
 }
 

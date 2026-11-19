@@ -11,6 +11,13 @@
 - `AGENTS.md` com o fluxo de trabalho em worktrees, validação e convenções.
 - Launcher com busca em janelas abertas, previews de mídia compactos e pastas na dock.
 
+### Corrigido
+
+- A tecla Windows não abre mais o menu Iniciar nativo; o foco volta ao aplicativo anterior ao fechar a pesquisa.
+- Win+Q e Win+S abrem a pesquisa do Dhruva em vez da pesquisa nativa do Windows.
+- Cliques repetidos na tecla Windows não dessincronizam mais o launcher: as alternâncias são processadas em ordem.
+- Atalhos com Windows (Win+Tab, Ctrl+Win+D etc.) continuam funcionando mesmo com a tecla física bloqueada.
+
 ### Créditos
 
 - Inspirado no **Dhruva** original para GNOME Shell, por **NarkAgni**:

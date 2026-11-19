@@ -345,18 +345,18 @@
             if (app.running && app.hwnd) {
                 const focused = await api.focusWindow(app.hwnd);
                 if (focused) {
-                    await api.closeLauncher();
+                    await api.closeLauncher(false);
                     return;
                 }
                 if (app.id.startsWith('running:')) {
                     await api.openPath(app.target);
-                    await api.closeLauncher();
+                    await api.closeLauncher(false);
                     return;
                 }
             }
 
             await api.launchApp(app.id);
-            await api.closeLauncher();
+            await api.closeLauncher(false);
         } catch (reason) {
             error = String(reason);
         } finally {

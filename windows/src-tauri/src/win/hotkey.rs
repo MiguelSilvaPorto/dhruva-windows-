@@ -1,9 +1,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::mpsc::{self, Sender};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::AppHandle;
-use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, LPARAM, LRESULT, WPARAM};
+use windows::core::{BOOL, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -12,15 +13,31 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RWIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-    SetWindowsHookExW, TranslateMessage, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED,
-    MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, DispatchMessageW, EnumWindows, GetClassNameW, GetForegroundWindow, GetMessageW,
+    GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, SW_HIDE,
+    WH_KEYBOARD_LL, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-static APP: OnceLock<AppHandle> = OnceLock::new();
 static WIN_DOWN: AtomicBool = AtomicBool::new(false);
 static COMBO: AtomicBool = AtomicBool::new(false);
 static CHORD_INTENT: AtomicBool = AtomicBool::new(false);
+
+/// Launcher toggles run one at a time, in press order. Spawning a thread per
+/// key-up lets two quick taps both read the same visibility state, which
+/// desyncs the launcher and can leave focus on a hidden shell window.
+static LAUNCHER_TX: Mutex<Option<Sender<LauncherRequest>>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+enum LauncherRequest {
+    Toggle,
+    Open,
+}
+
+/// Marks the events this hook injects itself. Other injected events are
+/// treated as real input so automation and remappers still go through the
+/// launcher instead of opening the native Start menu.
+pub const DHURVA_INJECTED: usize = 0x44_48_52_55;
 
 #[derive(Clone, Copy)]
 struct PendingModifier {
@@ -42,7 +59,15 @@ fn inject_key(vk: u32, scan: u32, extended: bool) {
         KEYBD_EVENT_FLAGS(0)
     };
     unsafe {
-        keybd_event(vk as u8, scan as u8, flags, 0);
+        keybd_event(vk as u8, scan as u8, flags, DHURVA_INJECTED);
+    }
+}
+
+fn request_launcher(request: LauncherRequest) {
+    if let Ok(slot) = LAUNCHER_TX.lock() {
+        if let Some(tx) = slot.as_ref() {
+            let _ = tx.send(request);
+        }
     }
 }
 
@@ -70,9 +95,13 @@ unsafe extern "system" fn keyboard_hook(
         let extended = info.flags.0 & LLKHF_EXTENDED.0 != 0;
         let message = wparam.0 as u32;
 
-        // Synthetic events (the Win-down/key-down/Win-up pair we send for a
-        // chord) must reach Windows untouched.
-        if info.flags.0 & LLKHF_INJECTED.0 != 0 {
+        // Synthetic events we injected ourselves (the Win-down/key-down/
+        // Win-up pair for a chord) must reach Windows untouched. Events
+        // injected by other tools are treated as real input, so a scripted
+        // Windows key also opens Dhruva instead of the native Start menu.
+        if info.flags.0 & LLKHF_INJECTED.0 != 0
+            && info.dwExtraInfo == DHURVA_INJECTED
+        {
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
@@ -94,6 +123,20 @@ unsafe extern "system" fn keyboard_hook(
                 }
 
                 CHORD_INTENT.store(true, Ordering::SeqCst);
+
+                // Win+Q and Win+S are the native search shortcuts. Dhruva is
+                // the search surface, so they open/focus the launcher instead
+                // of letting Windows show its own search flyout.
+                if matches!(vk, 0x51 | 0x53) {
+                    let has_modifier = PENDING_MODS
+                        .lock()
+                        .map(|pending| !pending.is_empty())
+                        .unwrap_or(false);
+                    if !has_modifier && !COMBO.swap(true, Ordering::SeqCst) {
+                        request_launcher(LauncherRequest::Open);
+                        return LRESULT(1);
+                    }
+                }
 
                 if is_modifier(vk) {
                     // Hold modifiers until the real chord key arrives, so
@@ -127,14 +170,14 @@ unsafe extern "system" fn keyboard_hook(
                 // Win down, held modifiers, the key, then Win up. Windows
                 // sees a real shortcut and never opens Start on release.
                 unsafe {
-                    keybd_event(VK_LWIN.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+                    keybd_event(VK_LWIN.0 as u8, 0, KEYBD_EVENT_FLAGS(0), DHURVA_INJECTED);
                 }
                 for modifier in pending {
                     inject_key(modifier.vk, modifier.scan, modifier.extended);
                 }
                 inject_key(vk, scan, extended);
                 unsafe {
-                    keybd_event(VK_LWIN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+                    keybd_event(VK_LWIN.0 as u8, 0, KEYEVENTF_KEYUP, DHURVA_INJECTED);
                 }
 
                 // The physical key is swallowed; the injected copy is the
@@ -150,11 +193,7 @@ unsafe extern "system" fn keyboard_hook(
                     let had_pending = clear_pending();
 
                     if !combo && !intent && !had_pending {
-                        if let Some(app) = APP.get().cloned() {
-                            std::thread::spawn(move || {
-                                crate::commands::toggle_launcher_cursor(&app);
-                            });
-                        }
+                        request_launcher(LauncherRequest::Toggle);
                     }
 
                     // Always swallow the physical Win-up. A synthetic one
@@ -186,35 +225,113 @@ unsafe extern "system" fn keyboard_hook(
     CallNextHookEx(None, code, wparam, lparam)
 }
 
+fn is_start_surface_path(path: &str) -> bool {
+    path.ends_with("startmenuexperiencehost.exe")
+        || path.ends_with("searchapp.exe")
+        || path.ends_with("searchhost.exe")
+}
+
+/// True for the native Start menu and Windows Search surfaces.
+pub fn is_start_surface_pid(pid: u32) -> bool {
+    process_path(pid)
+        .map(|path| is_start_surface_path(&path))
+        .unwrap_or(false)
+}
+
+unsafe extern "system" fn enum_start_surface(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let found = &mut *(lparam.0 as *mut Vec<HWND>);
+    if !IsWindowVisible(hwnd).as_bool() {
+        return BOOL(1);
+    }
+
+    // Cheap class filter first: the Start menu and the Search flyout are
+    // XAML CoreWindows. Opening a process for every visible window every
+    // 120 ms would be far more expensive than this check.
+    let mut class = [0u16; 64];
+    let len = GetClassNameW(hwnd, &mut class);
+    let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+    if !class.starts_with("Windows.UI.") {
+        return BOOL(1);
+    }
+
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == 0 {
+        return BOOL(1);
+    }
+
+    if is_start_surface_pid(pid) {
+        found.push(hwnd);
+    }
+
+    BOOL(1)
+}
+
+/// Dismisses the native Start/Search flyout when it currently owns focus.
+pub fn dismiss_start_surface() -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.is_invalid() {
+            return false;
+        }
+
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(foreground, Some(&mut pid));
+        if !is_start_surface_pid(pid) {
+            return false;
+        }
+
+        keybd_event(
+            VK_ESCAPE.0 as u8,
+            0,
+            KEYBD_EVENT_FLAGS(0),
+            DHURVA_INJECTED,
+        );
+        keybd_event(
+            VK_ESCAPE.0 as u8,
+            0,
+            KEYEVENTF_KEYUP,
+            DHURVA_INJECTED,
+        );
+        true
+    }
+}
+
 fn close_start_menu_forever() {
     std::thread::spawn(|| unsafe {
         loop {
             std::thread::sleep(Duration::from_millis(120));
-            let hwnd = GetForegroundWindow();
-            if hwnd.is_invalid() {
-                continue;
-            }
 
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid == 0 {
-                continue;
-            }
+            let mut found: Vec<HWND> = Vec::new();
+            let _ = EnumWindows(
+                Some(enum_start_surface),
+                LPARAM(&mut found as *mut Vec<HWND> as isize),
+            );
 
-            let Some(path) = process_path(pid) else {
-                continue;
-            };
-            let is_start_surface = path.ends_with("startmenuexperiencehost.exe")
-                || path.ends_with("searchapp.exe")
-                || path.ends_with("searchhost.exe");
-            if !is_start_surface {
-                continue;
-            }
+            for hwnd in found {
+                if GetForegroundWindow() == hwnd {
+                    // Safety net: if Windows ever manages to open its Start
+                    // menu or search flyout, dismiss it before it can stay
+                    // on screen.
+                    keybd_event(
+                        VK_ESCAPE.0 as u8,
+                        0,
+                        KEYBD_EVENT_FLAGS(0),
+                        DHURVA_INJECTED,
+                    );
+                    keybd_event(
+                        VK_ESCAPE.0 as u8,
+                        0,
+                        KEYEVENTF_KEYUP,
+                        DHURVA_INJECTED,
+                    );
+                }
 
-            // Safety net: if Windows ever manages to open its Start menu or
-            // search flyout, dismiss it before it can stay on screen.
-            keybd_event(VK_ESCAPE.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-            keybd_event(VK_ESCAPE.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+                // Even when it is behind the launcher, it must not be revealed
+                // when the launcher closes.
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
         }
     });
 }
@@ -240,7 +357,23 @@ fn process_path(pid: u32) -> Option<String> {
 /// replaying real Win chords. The physical Win key is never forwarded to
 /// Windows, so the native Start menu cannot open.
 pub fn install(app: AppHandle) {
-    let _ = APP.set(app);
+    let (launcher_tx, launcher_rx) = mpsc::channel::<LauncherRequest>();
+    if let Ok(mut slot) = LAUNCHER_TX.lock() {
+        *slot = Some(launcher_tx);
+    }
+    let launcher_app = app.clone();
+    std::thread::spawn(move || {
+        while let Ok(request) = launcher_rx.recv() {
+            match request {
+                LauncherRequest::Toggle => {
+                    crate::commands::toggle_launcher_cursor(&launcher_app);
+                }
+                LauncherRequest::Open => {
+                    crate::commands::open_launcher_cursor(&launcher_app);
+                }
+            }
+        }
+    });
 
     close_start_menu_forever();
 

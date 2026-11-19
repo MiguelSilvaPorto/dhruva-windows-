@@ -43,7 +43,8 @@ export const api = {
     releaseDockFocus: () => invoke<void>('release_dock_focus'),
     openStartMenu: () => invoke<void>('open_start_menu'),
     openLauncher: () => invoke<void>('open_launcher'),
-    closeLauncher: () => invoke<void>('close_launcher'),
+    closeLauncher: (restoreFocus = true) =>
+        invoke<void>('close_launcher', { restoreFocus }),
     openTaskView: () => invoke<void>('open_task_view'),
     newVirtualDesktop: () => invoke<void>('new_virtual_desktop'),
     closeVirtualDesktop: () => invoke<void>('close_virtual_desktop'),

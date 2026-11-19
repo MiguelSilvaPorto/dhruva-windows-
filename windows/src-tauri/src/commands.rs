@@ -2,8 +2,13 @@ use crate::catalog::{self, AppEntry};
 use crate::settings::{self, Settings};
 use crate::win;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
+};
 
 #[repr(C)]
 #[derive(Default)]
@@ -39,6 +44,109 @@ pub struct AppState {
     pub theme_light: Mutex<bool>,
     pub dock_work: (i32, i32, i32, i32),
     pub dock_full: (i32, i32, i32, i32),
+}
+
+/// Last foreground window owned by a real application. Windows can leave a
+/// hidden Start/Search window as the focus fallback when the launcher hides,
+/// so that memory is used to hand focus back to what the user was using.
+static LAST_REAL_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+
+pub fn remember_foreground() {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return;
+        }
+
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(foreground, Some(&mut pid));
+        if pid == 0 || pid == std::process::id() {
+            return;
+        }
+        if !IsWindowVisible(foreground).as_bool() || IsIconic(foreground).as_bool() {
+            return;
+        }
+        if win::hotkey::is_start_surface_pid(pid) {
+            return;
+        }
+
+        LAST_REAL_FOREGROUND.store(foreground.0 as isize, Ordering::SeqCst);
+    }
+}
+
+fn last_real_foreground() -> Option<HWND> {
+    let value = LAST_REAL_FOREGROUND.load(Ordering::SeqCst);
+    if value == 0 {
+        return None;
+    }
+    let hwnd = HWND(value as *mut core::ffi::c_void);
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return None;
+        }
+    }
+    Some(hwnd)
+}
+
+fn restore_previous_focus(launcher: Option<isize>) {
+    std::thread::spawn(move || unsafe {
+        let launcher = launcher.map(|value| HWND(value as *mut core::ffi::c_void));
+        let target = last_real_foreground();
+
+        for attempt in 0..20 {
+            let foreground = GetForegroundWindow();
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(foreground, Some(&mut pid));
+
+            let is_launcher = launcher.map(|value| value == foreground).unwrap_or(false);
+            if !foreground.0.is_null()
+                && !is_launcher
+                && !win::hotkey::is_start_surface_pid(pid)
+            {
+                // A real window took focus (for example the app the user just
+                // launched): never steal it.
+                return;
+            }
+
+            if let Some(target) = target {
+                if win::windows::focus(target) {
+                    return;
+                }
+            }
+
+            if attempt >= 1 && win::hotkey::is_start_surface_pid(pid) {
+                // The shell surface grabbed focus before the hand-off. Closing
+                // it makes Windows return focus to the window it covered.
+                win::hotkey::dismiss_start_surface();
+                if target.is_none() {
+                    return;
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    });
+}
+
+fn hide_launcher(window: &tauri::WebviewWindow, restore_focus: bool) {
+    let launcher = win::hwnd_of(window).map(|hwnd| hwnd.0 as isize);
+
+    if restore_focus {
+        // Hand focus over while this process still owns the foreground, then
+        // hide. Hiding first lets Windows activate a hidden Start/Search
+        // window as the fallback, which is what the user then sees.
+        if let Some(target) = last_real_foreground() {
+            unsafe {
+                let _ = SetForegroundWindow(target);
+            }
+        }
+    }
+
+    let _ = window.hide();
+
+    if restore_focus {
+        restore_previous_focus(launcher);
+    }
 }
 
 #[derive(Serialize)]
@@ -280,6 +388,8 @@ fn show_launcher_on(
         .get_webview_window("launcher")
         .ok_or_else(|| "janela do launcher indisponivel".to_string())?;
 
+    remember_foreground();
+
     let (x, y, width, height) = monitor;
     launcher
         .set_size(tauri::PhysicalSize::new(
@@ -311,8 +421,8 @@ pub fn open_launcher(
 }
 
 #[tauri::command]
-pub fn close_launcher(window: tauri::WebviewWindow) {
-    let _ = window.hide();
+pub fn close_launcher(window: tauri::WebviewWindow, restore_focus: Option<bool>) {
+    hide_launcher(&window, restore_focus.unwrap_or(true));
 }
 
 pub fn toggle_launcher_cursor(app: &AppHandle) {
@@ -325,7 +435,30 @@ pub fn toggle_launcher_cursor(app: &AppHandle) {
     };
 
     if launcher.is_visible().unwrap_or(false) {
-        let _ = launcher.hide();
+        hide_launcher(&launcher, true);
+    } else {
+        let (_, full) = win::cursor_monitor_metrics();
+        let _ = show_launcher_on(app, full);
+    }
+}
+
+/// Opens the launcher without toggling it closed. Used by the Win+Q and
+/// Win+S shortcuts, which Windows would otherwise use for its own search.
+pub fn open_launcher_cursor(app: &AppHandle) {
+    if win::windows::session_is_locked() {
+        return;
+    }
+
+    let Some(launcher) = app.get_webview_window("launcher") else {
+        return;
+    };
+
+    if launcher.is_visible().unwrap_or(false) {
+        if let Some(hwnd) = win::hwnd_of(&launcher) {
+            win::windows::focus(hwnd);
+        }
+        let _ = launcher.set_focus();
+        let _ = launcher.emit("launcher-open", ());
     } else {
         let (_, full) = win::cursor_monitor_metrics();
         let _ = show_launcher_on(app, full);
@@ -342,14 +475,15 @@ const VK_RIGHT: u8 = 0x27;
 
 fn send_combo(keys: &[u8]) {
     const KEYEVENTF_KEYUP: u32 = 0x0002;
+    let marker = win::hotkey::DHURVA_INJECTED;
 
     unsafe {
         for key in keys {
-            keybd_event(*key, 0, 0, 0);
+            keybd_event(*key, 0, 0, marker);
             std::thread::sleep(std::time::Duration::from_millis(22));
         }
         for key in keys.iter().rev() {
-            keybd_event(*key, 0, KEYEVENTF_KEYUP, 0);
+            keybd_event(*key, 0, KEYEVENTF_KEYUP, marker);
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
     }

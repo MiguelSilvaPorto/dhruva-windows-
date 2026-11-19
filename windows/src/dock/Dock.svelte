@@ -618,16 +618,26 @@
         });
     });
 
-    $effect(() => {
-        // Reserve the strip occupied by the bar so maximized windows stop
-        // above it instead of extending underneath. Auto-hide gives the
-        // screen back to windows and reveals the dock on demand.
+    function applyDockReservation() {
         const height =
             settings.iconSize +
             6 +
             settings.dockPaddingY * 2 +
             settings.dockMargin;
         void api.setDockReservation(height, !settings.autoHide).catch(() => {});
+    }
+
+    $effect(() => {
+        // Reserve the strip occupied by the bar so maximized windows stop
+        // above it instead of extending underneath. Auto-hide gives the
+        // screen back to windows and reveals the dock on demand.
+        applyDockReservation();
+
+        // The window is hidden while the first effect runs; the shell only
+        // applies the appbar after it is visible, so reserve again once the
+        // dock has settled.
+        const timer = setTimeout(applyDockReservation, 900);
+        return () => clearTimeout(timer);
     });
 
     $effect(() => {
@@ -781,6 +791,8 @@
         });
 
         onSessionUnlocked(() => {
+            applyDockReservation();
+            setTimeout(applyDockReservation, 600);
             hideTooltipNow();
             clearHide();
             void loadWifiStatus(false);

@@ -37,33 +37,18 @@ fn data_for(hwnd: HWND) -> APPBARDATA {
     }
 }
 
-fn total_for_monitor(monitor: (i32, i32, i32, i32)) -> i32 {
-    reserved()
-        .lock()
-        .unwrap()
-        .values()
-        .filter(|reservation| reservation.monitor == monitor)
-        .map(|reservation| reservation.height)
-        .sum()
-}
-
-/// Bottom edge the dock should use on this monitor: the screen bottom when
-/// the taskbar is hidden, the taskbar top when it is visible, or the desktop
-/// bottom (past our own reservation) when no taskbar is in the way.
+/// Bottom edge the dock should use on this monitor: above a visible bottom
+/// taskbar, otherwise the screen bottom. Our own reservations are ignored
+/// here; the appbar is always anchored to the screen edge, so re-applying it
+/// cannot walk it off-screen.
 pub fn base_bottom(monitor: (i32, i32, i32, i32)) -> i32 {
-    if taskbar::is_hidden_by_us() {
-        return monitor.1 + monitor.3;
+    if !taskbar::is_hidden_by_us() {
+        if let Some(top) = taskbar::visible_top_for_monitor(monitor) {
+            return top;
+        }
     }
 
-    if let Some(top) = taskbar::visible_top_for_monitor(monitor) {
-        return top;
-    }
-
-    let work_bottom = super::work_area_for(monitor)
-        .map(|(_, y, _, height)| y + height)
-        .unwrap_or(monitor.1 + monitor.3);
-
-    work_bottom + total_for_monitor(monitor)
+    monitor.1 + monitor.3
 }
 
 fn set_pos(hwnd: HWND, reservation: Reservation, bottom: i32) -> Result<(), String> {
@@ -87,7 +72,19 @@ fn set_pos(hwnd: HWND, reservation: Reservation, bottom: i32) -> Result<(), Stri
         data.rc.top = bottom - height;
         data.rc.bottom = bottom;
 
-        if SHAppBarMessage(ABM_SETPOS, &mut data) == 0 {
+        let result = SHAppBarMessage(ABM_SETPOS, &mut data);
+        log::debug!(
+            "appbar setpos hwnd={:?} edge={} rc=({},{}..{}, {}) result={} work={:?}",
+            hwnd,
+            data.uEdge,
+            data.rc.left,
+            data.rc.top,
+            data.rc.right,
+            data.rc.bottom,
+            result,
+            super::work_area_for(reservation.monitor)
+        );
+        if result == 0 {
             return Err("ABM_SETPOS failed".to_string());
         }
     }
@@ -106,6 +103,13 @@ pub fn reserve(hwnd: HWND, monitor: (i32, i32, i32, i32), height: i32) {
 
     // The bottom has to be measured before the new height enters the map.
     let bottom = base_bottom(monitor);
+    log::debug!(
+        "appbar reserve hwnd={:?} monitor={:?} height={} bottom={}",
+        hwnd,
+        monitor,
+        reservation.height,
+        bottom
+    );
     let key = key_of(hwnd);
     let existed = reserved()
         .lock()

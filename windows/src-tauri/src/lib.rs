@@ -360,15 +360,25 @@ fn start_foreground_watcher() {
 }
 
 fn start_taskbar_watcher(app: tauri::AppHandle) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(2));
-        let hide = {
-            let state = app.state::<AppState>();
-            let settings = state.settings.lock().unwrap();
-            settings.hide_taskbar
-        };
-        if hide {
-            win::taskbar::reconcile_all();
+    std::thread::spawn(move || {
+        let mut ticks = 0u32;
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let hide = {
+                let state = app.state::<AppState>();
+                let settings = state.settings.lock().unwrap();
+                settings.hide_taskbar
+            };
+            if hide {
+                win::taskbar::reconcile_all();
+            }
+
+            // Safety net: the shell can forget third-party appbars after an
+            // Explorer restart, a display change or a lock/unlock cycle.
+            ticks = ticks.wrapping_add(1);
+            if ticks % 5 == 0 {
+                win::appbar::refresh();
+            }
         }
     });
 }
@@ -383,6 +393,7 @@ fn start_session_watcher(app: tauri::AppHandle) {
             if was_locked && !locked {
                 log::info!("session unlocked; revealing the dock");
                 let _ = app.emit("session-unlocked", ());
+                win::appbar::refresh();
             }
             was_locked = locked;
         }

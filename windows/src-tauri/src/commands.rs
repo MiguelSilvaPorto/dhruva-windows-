@@ -849,11 +849,13 @@ pub fn dock_ready(window: tauri::WebviewWindow) {
         apply_no_activate(hwnd);
 
         // Tauri applies its own Windows styles while showing the window. Reapply
-        // the dock styles once that has settled.
+        // the dock styles once that has settled, and refresh the appbar after
+        // the window is really visible.
         let raw = hwnd.0 as isize as i64;
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(900));
             apply_no_activate(win::hwnd_from_i64(raw));
+            win::appbar::refresh();
         });
     }
 }

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#55AEFF"/>
+      <stop offset="1" stop-color="#0F62D6"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFDD7A"/>
+      <stop offset="1" stop-color="#F0A01A"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".32"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#tile)"/>
+  <rect x="14" y="12" width="100" height="46" rx="22" fill="url(#shine)"/>
+
+  <path d="M30 50 Q30 42 38 42 H57 L66 52 H92 Q100 52 100 60 V66 H30 Z" fill="#E39A16"/>
+  <rect x="46" y="33" width="42" height="42" rx="5" fill="#FFFFFF"/>
+  <rect x="53" y="43" width="28" height="4" rx="2" fill="#A9C9F2"/>
+  <rect x="53" y="51" width="20" height="4" rx="2" fill="#D3E3F8"/>
+
+  <path d="M28 60 Q28 54 35 54 H96 Q103 54 103 61 V90 Q103 98 95 98 H36 Q28 98 28 90 Z" fill="url(#front)"/>
+  <path d="M35 58 H95" stroke="#FFFFFF" stroke-opacity=".5" stroke-width="3" stroke-linecap="round"/>
+</svg>

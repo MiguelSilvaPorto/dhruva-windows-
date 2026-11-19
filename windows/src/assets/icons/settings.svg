@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4CB2FF"/>
+      <stop offset="1" stop-color="#0B5FD4"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#tile)"/>
+  <rect x="14" y="12" width="100" height="46" rx="22" fill="url(#shine)"/>
+
+  <g stroke="#FFFFFF" fill="none">
+    <circle cx="64" cy="64" r="21" stroke-width="13"/>
+    <g stroke-width="12" stroke-linecap="round">
+      <line x1="64" y1="31" x2="64" y2="43"/>
+      <line x1="64" y1="85" x2="64" y2="97"/>
+      <line x1="31" y1="64" x2="43" y2="64"/>
+      <line x1="85" y1="64" x2="97" y2="64"/>
+      <line x1="40.7" y1="40.7" x2="49.2" y2="49.2"/>
+      <line x1="78.8" y1="78.8" x2="87.3" y2="87.3"/>
+      <line x1="87.3" y1="40.7" x2="78.8" y2="49.2"/>
+      <line x1="49.2" y1="78.8" x2="40.7" y2="87.3"/>
+    </g>
+  </g>
+</svg>

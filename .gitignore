@@ -26,3 +26,10 @@ __pycache__/
 *.bak
 *.swp
 *.swo
+
+# Windows app (Tauri)
+windows/node_modules/
+windows/dist/
+windows/src-tauri/target/
+windows/src-tauri/gen/
+windows/*.log

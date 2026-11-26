@@ -206,6 +206,24 @@
     let previewHover = false;
     let previewHoverHwnd = $state<number | null>(null);
     let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
+    let previewRowEl = $state<HTMLDivElement | null>(null);
+    let previewScrollLeft = $state(0);
+    let previewScrollWidth = $state(0);
+    let previewScrollClientWidth = $state(0);
+    let previewDragging = $state(false);
+    let previewJustDragged = false;
+    let previewDragResetTimer: ReturnType<typeof setTimeout> | undefined;
+    let previewDrag: {
+        pointerId: number;
+        startX: number;
+        startScroll: number;
+        moved: boolean;
+    } | null = null;
+    const previewCanScrollLeft = $derived(previewScrollLeft > 1);
+    const previewCanScrollRight = $derived(
+        previewScrollLeft + previewScrollClientWidth <
+            previewScrollWidth - 1,
+    );
     const previewCache = new Map<
         number,
         { url: string | null; at: number }
@@ -870,6 +888,7 @@
             clearTimeout(revealTimer);
             clearTimeout(tooltipTimer);
             clearTimeout(regionTimer);
+            clearTimeout(previewDragResetTimer);
             clearTimeout(wifiForgetTimer);
             clearTimeout(bgConfirmTimer);
             clearTimeout(workspacePulseTimer);
@@ -1334,12 +1353,19 @@
 
     function hidePreview() {
         clearTimeout(previewHideTimer);
+        clearTimeout(previewDragResetTimer);
         previewHoverHwnd = null;
+        previewDrag = null;
+        previewDragging = false;
+        previewJustDragged = false;
         if (!previewOpen) return;
         previewOpen = false;
         previewKey = '';
         previewWindows = [];
         previewHover = false;
+        previewScrollLeft = 0;
+        previewScrollWidth = 0;
+        previewScrollClientWidth = 0;
         previewSeq++;
         scheduleRegion(hovering);
     }
@@ -1350,18 +1376,141 @@
     }
 
     function onPreviewLeave() {
+        if (previewDragging) return;
         previewHover = false;
         previewHoverHwnd = null;
         schedulePreviewHide();
     }
 
     function onPreviewCardEnter(window: WindowInfo) {
+        if (previewDragging) return;
         previewHoverHwnd = window.hwnd;
     }
 
     function onPreviewCardLeave(window: WindowInfo) {
         if (previewHoverHwnd !== window.hwnd) return;
         previewHoverHwnd = null;
+    }
+
+    function updatePreviewScroll() {
+        const row = previewRowEl;
+        if (!row) return;
+        previewScrollLeft = row.scrollLeft;
+        previewScrollWidth = row.scrollWidth;
+        previewScrollClientWidth = row.clientWidth;
+    }
+
+    function scrollPreview(direction: -1 | 1) {
+        const row = previewRowEl;
+        if (!row) return;
+        previewHoverHwnd = null;
+        const page = Math.max(200, row.clientWidth - 200);
+        const max = row.scrollWidth - row.clientWidth;
+        const target = Math.max(
+            0,
+            Math.min(max, row.scrollLeft + direction * page),
+        );
+        row.scrollTo({ left: target, behavior: 'smooth' });
+    }
+
+    function onPreviewWheel(event: WheelEvent) {
+        event.stopPropagation();
+        const row = previewRowEl;
+        if (!row) return;
+        const max = row.scrollWidth - row.clientWidth;
+        if (max <= 1) return;
+        event.preventDefault();
+        previewHoverHwnd = null;
+        const unit =
+            event.deltaMode === 1
+                ? 16
+                : event.deltaMode === 2
+                  ? row.clientWidth
+                  : 1;
+        const delta =
+            Math.abs(event.deltaX) > Math.abs(event.deltaY)
+                ? event.deltaX
+                : event.deltaY;
+        row.scrollLeft = Math.max(
+            0,
+            Math.min(max, row.scrollLeft + delta * unit),
+        );
+    }
+
+    function onPreviewPointerDown(event: PointerEvent) {
+        const row = previewRowEl;
+        if (!row || event.button !== 0) return;
+        if (row.scrollWidth <= row.clientWidth + 1) return;
+        if ((event.target as Element | null)?.closest('.preview-nav')) return;
+        previewDrag = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startScroll: row.scrollLeft,
+            moved: false,
+        };
+    }
+
+    function onPreviewPointerMove(event: PointerEvent) {
+        const drag = previewDrag;
+        const row = previewRowEl;
+        if (!drag || !row || drag.pointerId !== event.pointerId) return;
+        const dx = event.clientX - drag.startX;
+        if (!drag.moved) {
+            if (Math.abs(dx) < 5) return;
+            drag.moved = true;
+            previewDragging = true;
+            previewHoverHwnd = null;
+            row.setPointerCapture(event.pointerId);
+        }
+        event.preventDefault();
+        row.scrollLeft = drag.startScroll - dx;
+    }
+
+    function onPreviewPointerUp(event: PointerEvent) {
+        const drag = previewDrag;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        previewDrag = null;
+        if (!drag.moved) return;
+        previewDragging = false;
+        previewJustDragged = true;
+        clearTimeout(previewDragResetTimer);
+        previewDragResetTimer = setTimeout(() => {
+            previewJustDragged = false;
+        }, 350);
+    }
+
+    function onPreviewPointerCancel(event: PointerEvent) {
+        if (previewDrag?.pointerId !== event.pointerId) return;
+        previewDrag = null;
+        previewDragging = false;
+    }
+
+    function onPreviewKeyDown(event: KeyboardEvent) {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        const row = previewRowEl;
+        if (!row) return;
+        const cards = Array.from(
+            row.querySelectorAll<HTMLButtonElement>('.preview-card'),
+        );
+        if (cards.length === 0) return;
+        const active = document.activeElement as HTMLElement | null;
+        const current = cards.findIndex(card => card === active);
+        if (current < 0 && (!active || !row.contains(active))) return;
+        event.preventDefault();
+        const step = event.key === 'ArrowRight' ? 1 : -1;
+        const next =
+            current < 0
+                ? step > 0
+                    ? 0
+                    : cards.length - 1
+                : Math.max(0, Math.min(cards.length - 1, current + step));
+        const card = cards[next];
+        card.focus({ preventScroll: true });
+        card.scrollIntoView({
+            block: 'nearest',
+            inline: 'nearest',
+            behavior: 'smooth',
+        });
     }
 
     function bringPreviewWindow(window: WindowInfo) {
@@ -1455,11 +1604,18 @@
 
         if (previewHover) previewHover = false;
         cancelPreviewHide();
-        void tick().then(() => sendRegion(hovering));
+        void tick().then(() => {
+            updatePreviewScroll();
+            sendRegion(hovering);
+        });
         void loadPreviewThumbs(previewWindows, previewSeq);
     }
 
     function openPreviewWindow(window: WindowInfo) {
+        if (previewJustDragged) {
+            previewJustDragged = false;
+            return;
+        }
         bringPreviewWindow(window);
     }
 
@@ -3442,7 +3598,7 @@
             style={`left:${previewLeft}px; bottom:${previewBottom}px`}
             onpointerenter={onPreviewEnter}
             onpointerleave={onPreviewLeave}
-            onwheel={event => event.stopPropagation()}
+            onwheel={onPreviewWheel}
         >
             <div class="preview-head">
                 {#if previewIcon}
@@ -3455,46 +3611,120 @@
                 </span>
             </div>
 
-            <div class="preview-row">
-                {#each previewWindows as window (window.hwnd)}
-                    <button
-                        class="preview-card"
-                        class:is-hovered={previewHoverHwnd === window.hwnd}
-                        title={window.title}
-                        onclick={() => openPreviewWindow(window)}
-                        onpointerenter={() => onPreviewCardEnter(window)}
-                        onpointerleave={() => onPreviewCardLeave(window)}
-                    >
-                        <span class="preview-thumb">
-                            {#if previewThumbs[window.hwnd]}
-                                <img
-                                    src={previewThumbs[window.hwnd]}
-                                    alt=""
-                                    draggable="false"
-                                />
-                            {:else if previewLoading[window.hwnd]}
-                                <span class="preview-spinner"></span>
-                            {:else if window.minimized}
-                                <span class="preview-placeholder">
-                                    Minimizada
-                                </span>
-                            {:else}
-                                <span class="preview-placeholder">
-                                    Sem prévia
-                                </span>
-                            {/if}
-                        </span>
-                        <span class="preview-title">
-                            {window.title || 'Sem título'}
-                        </span>
-                        <span
-                            class="preview-hover-hint"
-                            class:is-visible={previewHoverHwnd === window.hwnd}
+            <div class="preview-viewport">
+                <div
+                    class="preview-row"
+                    class:is-dragging={previewDragging}
+                    bind:this={previewRowEl}
+                    role="toolbar"
+                    aria-label={`Janelas de ${previewName}`}
+                    aria-orientation="horizontal"
+                    onscroll={updatePreviewScroll}
+                    onkeydown={onPreviewKeyDown}
+                    onpointerdown={onPreviewPointerDown}
+                    onpointermove={onPreviewPointerMove}
+                    onpointerup={onPreviewPointerUp}
+                    onpointercancel={onPreviewPointerCancel}
+                >
+                    {#each previewWindows as window (window.hwnd)}
+                        <button
+                            class="preview-card"
+                            class:is-hovered={previewHoverHwnd === window.hwnd}
+                            title={window.title}
+                            onclick={() => openPreviewWindow(window)}
+                            onpointerenter={() => onPreviewCardEnter(window)}
+                            onpointerleave={() => onPreviewCardLeave(window)}
+                            onfocus={() => onPreviewCardEnter(window)}
+                            onblur={() => onPreviewCardLeave(window)}
                         >
-                            Trazer para frente
-                        </span>
-                    </button>
-                {/each}
+                            <span class="preview-thumb">
+                                {#if previewThumbs[window.hwnd]}
+                                    <img
+                                        src={previewThumbs[window.hwnd]}
+                                        alt=""
+                                        draggable="false"
+                                    />
+                                {:else if previewLoading[window.hwnd]}
+                                    <span class="preview-spinner"></span>
+                                {:else if window.minimized}
+                                    <span class="preview-placeholder">
+                                        Minimizada
+                                    </span>
+                                {:else}
+                                    <span class="preview-placeholder">
+                                        Sem prévia
+                                    </span>
+                                {/if}
+                            </span>
+                            <span class="preview-title">
+                                {window.title || 'Sem título'}
+                            </span>
+                            <span
+                                class="preview-hover-hint"
+                                class:is-visible={previewHoverHwnd ===
+                                    window.hwnd}
+                            >
+                                Trazer para frente
+                            </span>
+                        </button>
+                    {/each}
+                </div>
+
+                <span
+                    class="preview-edge is-left"
+                    class:is-visible={previewCanScrollLeft}
+                    aria-hidden="true"
+                ></span>
+                <span
+                    class="preview-edge is-right"
+                    class:is-visible={previewCanScrollRight}
+                    aria-hidden="true"
+                ></span>
+
+                <button
+                    class="preview-nav is-left"
+                    class:is-visible={previewCanScrollLeft}
+                    tabindex="-1"
+                    aria-label="Janelas anteriores"
+                    title="Janelas anteriores"
+                    onclick={() => scrollPreview(-1)}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M9.8 3.5 5.3 8l4.5 4.5" />
+                    </svg>
+                </button>
+                <button
+                    class="preview-nav is-right"
+                    class:is-visible={previewCanScrollRight}
+                    tabindex="-1"
+                    aria-label="Próximas janelas"
+                    title="Próximas janelas"
+                    onclick={() => scrollPreview(1)}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M6.2 3.5 10.7 8l-4.5 4.5" />
+                    </svg>
+                </button>
             </div>
         </div>
     {/if}
@@ -6942,11 +7172,99 @@
         font-size: 10px;
     }
 
+    .preview-viewport {
+        position: relative;
+        min-width: 0;
+    }
+
     .preview-row {
         display: flex;
         gap: 8px;
         overflow-x: auto;
+        overscroll-behavior-x: contain;
         padding-bottom: 2px;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        user-select: none;
+    }
+
+    .preview-row::-webkit-scrollbar {
+        display: none;
+    }
+
+    .preview-row.is-dragging,
+    .preview-row.is-dragging .preview-card {
+        cursor: grabbing;
+    }
+
+    .preview-edge {
+        position: absolute;
+        top: 0;
+        bottom: 2px;
+        z-index: 1;
+        width: 34px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 140ms ease;
+    }
+
+    .preview-edge.is-left {
+        left: 0;
+        background: linear-gradient(to right, var(--menu-bg) 8%, transparent);
+    }
+
+    .preview-edge.is-right {
+        right: 0;
+        background: linear-gradient(to left, var(--menu-bg) 8%, transparent);
+    }
+
+    .preview-edge.is-visible {
+        opacity: 1;
+    }
+
+    .preview-nav {
+        position: absolute;
+        top: 50%;
+        z-index: 2;
+        display: grid;
+        width: 26px;
+        height: 52px;
+        place-items: center;
+        padding: 0;
+        border: 1px solid var(--glass-border);
+        border-radius: 999px;
+        background: var(--dock-bg);
+        box-shadow:
+            0 8px 20px rgba(0, 0, 0, 0.24),
+            inset 0 1px 0 var(--glass-inner);
+        color: var(--text);
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(-50%) scale(0.94);
+        transition:
+            opacity 120ms ease,
+            transform 120ms ease,
+            border-color 120ms ease,
+            color 120ms ease;
+    }
+
+    .preview-nav.is-visible {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(-50%) scale(1);
+    }
+
+    .preview-nav:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    .preview-nav.is-left {
+        left: -4px;
+    }
+
+    .preview-nav.is-right {
+        right: -4px;
     }
 
     .preview-card {
@@ -6974,6 +7292,11 @@
         border-color: var(--accent);
         background: var(--hover);
         box-shadow: 0 0 0 1px var(--accent-soft);
+    }
+
+    .preview-card:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
     }
 
     .preview-card:only-child {

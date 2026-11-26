@@ -13,6 +13,7 @@
 - Prévia ao vivo da mídia: clicar na capa abre um quadro ao vivo do vídeo; em navegadores, a aba correspondente é ativada e restaurada ao fechar.
 - Controle de volume e mudo por aplicativo no painel de mídia, independente do volume do Windows.
 - Controle de tempo preciso: sincroniza a posição com o player do navegador, permite arrastar a barra e pular 10 segundos.
+- Prévia de janelas navegável na horizontal: roda do mouse, arraste, setas laterais e teclas de direção percorrem todas as janelas do aplicativo.
 
 ### Corrigido
 

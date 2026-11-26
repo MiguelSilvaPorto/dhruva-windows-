@@ -117,6 +117,11 @@ export interface MediaAudio {
     muted: boolean;
 }
 
+export interface MasterAudio {
+    volume: number;
+    muted: boolean;
+}
+
 export interface MediaTimeline {
     positionMs: number;
     durationMs: number;

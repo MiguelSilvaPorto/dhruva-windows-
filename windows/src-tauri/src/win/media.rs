@@ -195,10 +195,13 @@ fn best_title_window<'a>(
 /// Starts a live preview session: finds the window that owns the current
 /// media, selects its matching tab when it is a browser, and reports the
 /// previous tab so closing the preview can restore it.
-pub fn preview_start() -> Option<PreviewSession> {
+pub fn preview_start(
+    title_hint: Option<String>,
+    app_hint: Option<String>,
+) -> Option<PreviewSession> {
     let status = status();
-    let title = status.title?;
-    let app = status.app.unwrap_or_default();
+    let title = title_hint.or(status.title)?;
+    let app = app_hint.or(status.app).unwrap_or_default();
     let needle = exe_needle(&app);
 
     let mut candidates: Vec<super::windows::WindowInfo> = super::windows::list()
@@ -206,6 +209,16 @@ pub fn preview_start() -> Option<PreviewSession> {
         .filter(|window| !window.minimized)
         .filter(|window| needle.is_empty() || window.exe.to_lowercase().contains(needle))
         .collect();
+
+    log::info!(
+        "media preview: title={:?} app={:?} candidates={:?}",
+        title,
+        app,
+        candidates
+            .iter()
+            .map(|window| (&window.title, window.minimized, window.focused))
+            .collect::<Vec<_>>()
+    );
 
     if candidates.is_empty() {
         return None;
@@ -215,7 +228,14 @@ pub fn preview_start() -> Option<PreviewSession> {
 
     if is_browser(&app) {
         let hwnds: Vec<i64> = candidates.iter().map(|window| window.hwnd).collect();
-        if let Some(tab) = super::accessibility::select_tab(&hwnds, &title) {
+        let started = std::time::Instant::now();
+        let tab = super::accessibility::select_tab(&hwnds, &title);
+        log::info!(
+            "media preview: select_tab={} took={:?}",
+            tab.is_some(),
+            started.elapsed()
+        );
+        if let Some(tab) = tab {
             let window = candidates.iter().find(|window| window.hwnd == tab.hwnd)?;
             return Some(PreviewSession {
                 hwnd: tab.hwnd,
@@ -225,7 +245,12 @@ pub fn preview_start() -> Option<PreviewSession> {
         }
     }
 
-    let window = best_title_window(&candidates, &title)?;
+    let window = best_title_window(&candidates, &title);
+    log::info!(
+        "media preview: fallback={:?}",
+        window.map(|window| window.title.clone())
+    );
+    let window = window?;
     Some(PreviewSession {
         hwnd: window.hwnd,
         title: window.title.clone(),

@@ -30,8 +30,8 @@ export const api = {
         invoke<void>('background_terminate', { pid }),
     getMediaStatus: () => invoke<MediaStatus>('media_status'),
     getMediaArt: () => invoke<string | null>('media_art'),
-    mediaPreviewStart: () =>
-        invoke<MediaPreviewSession | null>('media_preview_start'),
+    mediaPreviewStart: (title?: string | null, app?: string | null) =>
+        invoke<MediaPreviewSession | null>('media_preview_start', { title, app }),
     mediaPreviewStop: (selection: MediaPreviewTab) =>
         invoke<boolean>('media_preview_stop', { selection }),
     getMediaAudio: () => invoke<MediaAudio | null>('media_audio'),

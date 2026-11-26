@@ -2576,7 +2576,9 @@
         await restoreMediaPreviewTab();
         if (seq !== mediaPreviewSeq || !mediaPreviewOpen) return;
 
-        const target = await api.mediaPreviewStart().catch(() => null);
+        const target = await api
+            .mediaPreviewStart(media?.title ?? null, media?.app ?? null)
+            .catch(() => null);
         if (seq !== mediaPreviewSeq || !mediaPreviewOpen) {
             if (target?.tab) {
                 void api.mediaPreviewStop(target.tab).catch(() => false);

@@ -14,11 +14,13 @@
 - Controle de volume e mudo por aplicativo no painel de mídia, independente do volume do Windows.
 - Controle rápido do volume do sistema: clicar no ícone de som abre um painel com volume mestre, mudo, misturador de volume e configurações de som do Windows.
 - Controle de tempo preciso: sincroniza a posição com o player do navegador, permite arrastar a barra e pular 10 segundos.
+- Prévia de janelas navegável na horizontal: roda do mouse, arraste, setas laterais e teclas de direção percorrem todas as janelas do aplicativo.
 
 ### Corrigido
 
 - A dock volta a reservar a área da tela ao ser exibida e depois do desbloqueio; janelas maximizadas não ficam mais por baixo dela.
 - Passar o mouse pela prévia de uma janela não traz mais o aplicativo para frente; somente o clique ativa a janela.
+- A prévia de mídia volta a encontrar a janela do vídeo mesmo quando o Windows entrega a sessão sem título; o painel usa o título/aplicativo que está exibindo como referência.
 - A tecla Windows não abre mais o menu Iniciar nativo; o foco volta ao aplicativo anterior ao fechar a pesquisa.
 - Win+Q e Win+S abrem a pesquisa do Dhruva em vez da pesquisa nativa do Windows.
 - Cliques repetidos na tecla Windows não dessincronizam mais o launcher: as alternâncias são processadas em ordem.

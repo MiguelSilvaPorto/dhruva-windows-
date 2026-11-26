@@ -17,6 +17,7 @@
     import type {
         AppEntry,
         BackgroundApp,
+        MasterAudio,
         MediaStatus,
         MediaPreviewTab,
         Settings,
@@ -116,6 +117,17 @@
     let wifiSeq = 0;
     let wifiForgetTimer: ReturnType<typeof setTimeout> | undefined;
 
+    let volumePanelOpen = $state(false);
+    let volumePanelEl = $state<HTMLDivElement | null>(null);
+    let volumePanelLeft = $state(0);
+    let masterVolume = $state<number | null>(null);
+    let masterMuted = $state(false);
+    let masterError = $state<string | null>(null);
+    let masterLoading = $state(true);
+    let masterBusy = $state<string | null>(null);
+    let masterVolumeSyncAt = 0;
+    let masterVolumeApplyTimer: ReturnType<typeof setTimeout> | undefined;
+
     let media = $state<MediaStatus | null>(null);
     let mediaArt = $state<string | null>(null);
     let mediaArtKey = '';
@@ -208,10 +220,40 @@
     let previewHover = false;
     let previewHoverHwnd = $state<number | null>(null);
     let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
+    let previewPrefetchTimer: ReturnType<typeof setTimeout> | undefined;
+    let previewRowEl = $state<HTMLDivElement | null>(null);
+    let previewScrollLeft = $state(0);
+    let previewScrollWidth = $state(0);
+    let previewScrollClientWidth = $state(0);
+    let previewDragging = $state(false);
+    let previewJustDragged = false;
+    let previewDragResetTimer: ReturnType<typeof setTimeout> | undefined;
+    let previewDrag: {
+        pointerId: number;
+        startX: number;
+        startScroll: number;
+        moved: boolean;
+    } | null = null;
+    const previewCanScrollLeft = $derived(previewScrollLeft > 1);
+    const previewCanScrollRight = $derived(
+        previewScrollLeft + previewScrollClientWidth <
+            previewScrollWidth - 1,
+    );
     const previewCache = new Map<
         number,
         { url: string | null; at: number }
     >();
+    const previewInflight = new Map<number, Promise<string | null>>();
+
+    // The preview opens after this delay; captures start a little before it,
+    // so the thumbnails are usually ready before the panel appears.
+    const PREVIEW_SHOW_DELAY = 320;
+    const PREFETCH_DELAY = 70;
+    // Thumbnails stay usable while a fresh frame is captured in background.
+    const THUMB_FRESH_MS = 10_000;
+    const THUMB_KEEP_MS = 120_000;
+    const THUMB_MAX_WIDTH = 240;
+    const THUMB_MAX_HEIGHT = 132;
 
     let baseWidth = $state(0);
     let baseCenters: number[] = [];
@@ -662,6 +704,19 @@
     });
 
     $effect(() => {
+        if (!volumePanelOpen) return;
+        void refreshMasterAudio();
+        const timer = setInterval(() => void refreshMasterAudio(), 1200);
+        return () => clearInterval(timer);
+    });
+
+    $effect(() => {
+        if (!volumePanelOpen) return;
+        masterError;
+        void tick().then(() => sendRegion(true));
+    });
+
+    $effect(() => {
         if (!mediaOpen) return;
         mediaArt;
         media?.title;
@@ -767,6 +822,7 @@
         const dismissOverlays = (source?: string) => {
             if (source === currentWindowLabel) return;
             if (wifiPanelOpen) closeWifiPanel();
+            if (volumePanelOpen) closeVolumePanel();
             if (mediaOpen) closeMediaPanel();
             if (bgPanelOpen) closeBackgroundPanel();
             if (menu) closeMenu();
@@ -787,6 +843,7 @@
             if (event.key !== 'Escape') return;
             if (wifiPasswordFor) cancelWifiPassword();
             else if (wifiPanelOpen) closeWifiPanel();
+            else if (volumePanelOpen) closeVolumePanel();
             else if (mediaOpen) closeMediaPanel();
             else if (bgPanelOpen) closeBackgroundPanel();
             else if (menu) closeMenu();
@@ -842,12 +899,18 @@
         refreshStatus();
         void loadWifiStatus(false);
         void refreshMedia();
+        void refreshMasterAudio();
         void refreshDesktopIndicator();
         const statusTimer = setInterval(refreshStatus, 30000);
         const desktopTimer = setInterval(refreshDesktopIndicator, 800);
         const wifiTimer = setInterval(() => {
             if (!wifiPanelOpen) void loadWifiStatus(false);
         }, 30000);
+        const masterTimer = setInterval(() => {
+            if (!volumePanelOpen && Date.now() - masterVolumeSyncAt > 1200) {
+                void refreshMasterAudio();
+            }
+        }, 20000);
         const mediaTimer = setInterval(() => {
             void refreshMedia();
         }, 1000);
@@ -885,6 +948,7 @@
             clearInterval(statusTimer);
             clearInterval(desktopTimer);
             clearInterval(wifiTimer);
+            clearInterval(masterTimer);
             clearInterval(mediaTimer);
             clearInterval(mediaProgressTimer);
             clearInterval(clockTimer);
@@ -892,6 +956,9 @@
             clearTimeout(revealTimer);
             clearTimeout(tooltipTimer);
             clearTimeout(regionTimer);
+            clearTimeout(previewPrefetchTimer);
+            clearTimeout(previewHideTimer);
+            clearTimeout(previewDragResetTimer);
             clearTimeout(wifiForgetTimer);
             clearTimeout(bgConfirmTimer);
             clearTimeout(workspacePulseTimer);
@@ -1007,6 +1074,17 @@
             });
         }
 
+        const volumeRect = volumePanelEl?.getBoundingClientRect();
+        if (volumePanelOpen && volumeRect && volumeRect.width > 0) {
+            rects.push({
+                x: volumeRect.left - 10,
+                y: volumeRect.top - 10,
+                w: volumeRect.width + 20,
+                h: volumeRect.height + 20,
+                radius: 22,
+            });
+        }
+
         const mediaRect = mediaPanelEl?.getBoundingClientRect();
         if (mediaOpen && mediaRect && mediaRect.width > 0) {
             rects.push({
@@ -1073,6 +1151,7 @@
             !settings.autoHide ||
             menu ||
             wifiPanelOpen ||
+            volumePanelOpen ||
             mediaOpen ||
             bgPanelOpen ||
             draggingKey
@@ -1083,6 +1162,7 @@
                 !hovering &&
                 !menu &&
                 !wifiPanelOpen &&
+                !volumePanelOpen &&
                 !mediaOpen &&
                 !bgPanelOpen
             )
@@ -1101,6 +1181,8 @@
         wifiPasswordFor = null;
         wifiPassword = '';
         wifiForgetFor = null;
+        volumePanelOpen = false;
+        masterError = null;
         mediaOpen = false;
         bgPanelOpen = false;
         bgConfirmPid = null;
@@ -1294,6 +1376,7 @@
             clearTimeout(tooltipTimer);
             tooltipVisible = false;
             if (previewOpen && previewKey !== item.key) hidePreview();
+            schedulePreviewPrefetch(index);
         }
 
         tooltipLabel = label;
@@ -1313,11 +1396,12 @@
             tooltipBottom = window.innerHeight - rect.top + 10;
             tooltipVisible = true;
             openPreviewForIndex(index);
-        }, 520);
+        }, PREVIEW_SHOW_DELAY);
     }
 
     function hideTooltipNow() {
         clearTimeout(tooltipTimer);
+        clearTimeout(previewPrefetchTimer);
         tooltipVisible = false;
     }
 
@@ -1356,12 +1440,19 @@
 
     function hidePreview() {
         clearTimeout(previewHideTimer);
+        clearTimeout(previewDragResetTimer);
         previewHoverHwnd = null;
+        previewDrag = null;
+        previewDragging = false;
+        previewJustDragged = false;
         if (!previewOpen) return;
         previewOpen = false;
         previewKey = '';
         previewWindows = [];
         previewHover = false;
+        previewScrollLeft = 0;
+        previewScrollWidth = 0;
+        previewScrollClientWidth = 0;
         previewSeq++;
         scheduleRegion(hovering);
     }
@@ -1372,18 +1463,141 @@
     }
 
     function onPreviewLeave() {
+        if (previewDragging) return;
         previewHover = false;
         previewHoverHwnd = null;
         schedulePreviewHide();
     }
 
     function onPreviewCardEnter(window: WindowInfo) {
+        if (previewDragging) return;
         previewHoverHwnd = window.hwnd;
     }
 
     function onPreviewCardLeave(window: WindowInfo) {
         if (previewHoverHwnd !== window.hwnd) return;
         previewHoverHwnd = null;
+    }
+
+    function updatePreviewScroll() {
+        const row = previewRowEl;
+        if (!row) return;
+        previewScrollLeft = row.scrollLeft;
+        previewScrollWidth = row.scrollWidth;
+        previewScrollClientWidth = row.clientWidth;
+    }
+
+    function scrollPreview(direction: -1 | 1) {
+        const row = previewRowEl;
+        if (!row) return;
+        previewHoverHwnd = null;
+        const page = Math.max(200, row.clientWidth - 200);
+        const max = row.scrollWidth - row.clientWidth;
+        const target = Math.max(
+            0,
+            Math.min(max, row.scrollLeft + direction * page),
+        );
+        row.scrollTo({ left: target, behavior: 'smooth' });
+    }
+
+    function onPreviewWheel(event: WheelEvent) {
+        event.stopPropagation();
+        const row = previewRowEl;
+        if (!row) return;
+        const max = row.scrollWidth - row.clientWidth;
+        if (max <= 1) return;
+        event.preventDefault();
+        previewHoverHwnd = null;
+        const unit =
+            event.deltaMode === 1
+                ? 16
+                : event.deltaMode === 2
+                  ? row.clientWidth
+                  : 1;
+        const delta =
+            Math.abs(event.deltaX) > Math.abs(event.deltaY)
+                ? event.deltaX
+                : event.deltaY;
+        row.scrollLeft = Math.max(
+            0,
+            Math.min(max, row.scrollLeft + delta * unit),
+        );
+    }
+
+    function onPreviewPointerDown(event: PointerEvent) {
+        const row = previewRowEl;
+        if (!row || event.button !== 0) return;
+        if (row.scrollWidth <= row.clientWidth + 1) return;
+        if ((event.target as Element | null)?.closest('.preview-nav')) return;
+        previewDrag = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startScroll: row.scrollLeft,
+            moved: false,
+        };
+    }
+
+    function onPreviewPointerMove(event: PointerEvent) {
+        const drag = previewDrag;
+        const row = previewRowEl;
+        if (!drag || !row || drag.pointerId !== event.pointerId) return;
+        const dx = event.clientX - drag.startX;
+        if (!drag.moved) {
+            if (Math.abs(dx) < 5) return;
+            drag.moved = true;
+            previewDragging = true;
+            previewHoverHwnd = null;
+            row.setPointerCapture(event.pointerId);
+        }
+        event.preventDefault();
+        row.scrollLeft = drag.startScroll - dx;
+    }
+
+    function onPreviewPointerUp(event: PointerEvent) {
+        const drag = previewDrag;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        previewDrag = null;
+        if (!drag.moved) return;
+        previewDragging = false;
+        previewJustDragged = true;
+        clearTimeout(previewDragResetTimer);
+        previewDragResetTimer = setTimeout(() => {
+            previewJustDragged = false;
+        }, 350);
+    }
+
+    function onPreviewPointerCancel(event: PointerEvent) {
+        if (previewDrag?.pointerId !== event.pointerId) return;
+        previewDrag = null;
+        previewDragging = false;
+    }
+
+    function onPreviewKeyDown(event: KeyboardEvent) {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        const row = previewRowEl;
+        if (!row) return;
+        const cards = Array.from(
+            row.querySelectorAll<HTMLButtonElement>('.preview-card'),
+        );
+        if (cards.length === 0) return;
+        const active = document.activeElement as HTMLElement | null;
+        const current = cards.findIndex(card => card === active);
+        if (current < 0 && (!active || !row.contains(active))) return;
+        event.preventDefault();
+        const step = event.key === 'ArrowRight' ? 1 : -1;
+        const next =
+            current < 0
+                ? step > 0
+                    ? 0
+                    : cards.length - 1
+                : Math.max(0, Math.min(cards.length - 1, current + step));
+        const card = cards[next];
+        card.focus({ preventScroll: true });
+        card.scrollIntoView({
+            block: 'nearest',
+            inline: 'nearest',
+            behavior: 'smooth',
+        });
     }
 
     function bringPreviewWindow(window: WindowInfo) {
@@ -1398,37 +1612,99 @@
             .catch(error => console.error('focus_window failed', error));
     }
 
-    async function loadPreviewThumbs(windows: WindowInfo[], seq: number) {
-        const now = Date.now();
+    function previewThumbRequest(): [number, number] {
+        // Capture only the pixels the card actually shows, even on HiDPI.
+        const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+        return [
+            Math.round(THUMB_MAX_WIDTH * dpr),
+            Math.round(THUMB_MAX_HEIGHT * dpr),
+        ];
+    }
+
+    function cachedPreviewThumb(hwnd: number) {
+        const cached = previewCache.get(hwnd);
+        if (!cached) return undefined;
+        if (Date.now() - cached.at > THUMB_KEEP_MS) {
+            previewCache.delete(hwnd);
+            return undefined;
+        }
+        return cached;
+    }
+
+    function capturePreviewThumb(hwnd: number): Promise<string | null> {
+        // Prefetch and the open panel share the same capture.
+        const inflight = previewInflight.get(hwnd);
+        if (inflight) return inflight;
+
+        const [width, height] = previewThumbRequest();
+        const promise = api
+            .windowPreviewJpeg(hwnd, width, height)
+            .then(url => {
+                previewCache.set(hwnd, { url, at: Date.now() });
+                return url;
+            })
+            .catch(() => {
+                previewCache.set(hwnd, { url: null, at: Date.now() });
+                return null;
+            })
+            .finally(() => {
+                previewInflight.delete(hwnd);
+            });
+
+        previewInflight.set(hwnd, promise);
+        return promise;
+    }
+
+    function schedulePreviewPrefetch(index: number) {
+        clearTimeout(previewPrefetchTimer);
+        const item = previewItem(index);
+        if (!item || item.windows.length === 0) return;
+
+        const windows = item.windows;
+        previewPrefetchTimer = setTimeout(() => {
+            const now = Date.now();
+            for (const window of windows) {
+                if (window.minimized) continue;
+                const cached = cachedPreviewThumb(window.hwnd);
+                if (cached?.url && now - cached.at < THUMB_FRESH_MS) continue;
+                void capturePreviewThumb(window.hwnd);
+            }
+        }, PREFETCH_DELAY);
+    }
+
+    function loadPreviewThumbs(windows: WindowInfo[], seq: number) {
         for (const window of windows) {
             if (window.minimized) {
-                previewThumbs = { ...previewThumbs, [window.hwnd]: null };
+                if (seq === previewSeq) {
+                    previewThumbs = { ...previewThumbs, [window.hwnd]: null };
+                }
                 continue;
             }
 
-            const cached = previewCache.get(window.hwnd);
-            if (cached && now - cached.at < 4000) {
-                previewThumbs = { ...previewThumbs, [window.hwnd]: cached.url };
+            const cached = cachedPreviewThumb(window.hwnd);
+            if (cached?.url) {
+                if (seq === previewSeq) {
+                    previewThumbs = {
+                        ...previewThumbs,
+                        [window.hwnd]: cached.url,
+                    };
+                }
+                if (Date.now() - cached.at < THUMB_FRESH_MS) continue;
+
+                // Show the old frame right away and refresh behind the scenes.
+                void capturePreviewThumb(window.hwnd).then(url => {
+                    if (seq !== previewSeq || !url || url === cached.url) return;
+                    previewThumbs = { ...previewThumbs, [window.hwnd]: url };
+                });
                 continue;
             }
 
             previewLoading = { ...previewLoading, [window.hwnd]: true };
-            api
-                .windowPreview(window.hwnd, 480, 300)
-                .then(url => {
-                    previewCache.set(window.hwnd, { url, at: Date.now() });
-                    if (seq !== previewSeq) return;
-                    previewThumbs = { ...previewThumbs, [window.hwnd]: url };
-                })
-                .catch(() => {
-                    previewCache.set(window.hwnd, { url: null, at: Date.now() });
-                    if (seq !== previewSeq) return;
-                    previewThumbs = { ...previewThumbs, [window.hwnd]: null };
-                })
-                .finally(() => {
-                    if (seq !== previewSeq) return;
-                    previewLoading = { ...previewLoading, [window.hwnd]: false };
-                });
+            void capturePreviewThumb(window.hwnd).then(url => {
+                if (seq !== previewSeq) return;
+                previewThumbs = { ...previewThumbs, [window.hwnd]: url };
+                previewLoading = { ...previewLoading, [window.hwnd]: false };
+            });
         }
     }
 
@@ -1458,13 +1734,27 @@
         );
         const half = estimatedWidth / 2;
 
+        const ordered = [...item.windows].sort(
+            (a, b) => Number(b.focused) - Number(a.focused),
+        );
+
+        // Paint whatever the prefetch already has before the panel opens,
+        // instead of flashing empty placeholders.
+        const knownThumbs: Record<number, string | null> = {};
+        for (const window of ordered) {
+            if (window.minimized) {
+                knownThumbs[window.hwnd] = null;
+                continue;
+            }
+            const cached = cachedPreviewThumb(window.hwnd);
+            if (cached?.url) knownThumbs[window.hwnd] = cached.url;
+        }
+
         previewKey = item.key;
         previewName = item.name;
         previewIcon = item.icon;
-        previewWindows = [...item.windows].sort(
-            (a, b) => Number(b.focused) - Number(a.focused),
-        );
-        previewThumbs = {};
+        previewWindows = ordered;
+        previewThumbs = knownThumbs;
         previewLoading = {};
         previewLeft = Math.max(
             half + 10,
@@ -1477,11 +1767,18 @@
 
         if (previewHover) previewHover = false;
         cancelPreviewHide();
-        void tick().then(() => sendRegion(hovering));
-        void loadPreviewThumbs(previewWindows, previewSeq);
+        void tick().then(() => {
+            updatePreviewScroll();
+            sendRegion(hovering);
+        });
+        loadPreviewThumbs(ordered, previewSeq);
     }
 
     function openPreviewWindow(window: WindowInfo) {
+        if (previewJustDragged) {
+            previewJustDragged = false;
+            return;
+        }
         bringPreviewWindow(window);
     }
 
@@ -1674,6 +1971,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -1718,6 +2016,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -1755,6 +2054,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -1797,6 +2097,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -1892,6 +2193,7 @@
     function closeAllDockPanels() {
         closeMenu();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -2063,6 +2365,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -2086,6 +2389,7 @@
     function openActionCenter() {
         closeMenu();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -2133,6 +2437,117 @@
         void loadWifiStatus(true);
     }
 
+    function applyMasterAudio(audio: MasterAudio | null) {
+        if (!audio) {
+            masterVolume = null;
+            return;
+        }
+        // The slider is the source of truth while the user drags it.
+        if (Date.now() - masterVolumeSyncAt < 900) return;
+        masterVolume = audio.volume;
+        masterMuted = audio.muted;
+    }
+
+    async function refreshMasterAudio() {
+        if (masterVolume == null) masterLoading = true;
+        try {
+            applyMasterAudio(await api.getMasterAudio());
+        } catch (error) {
+            if (volumePanelOpen) masterError = errorText(error);
+        } finally {
+            masterLoading = false;
+        }
+    }
+
+    function masterStatusLabel(): string {
+        if (masterMuted) return 'Silenciado';
+        if (masterVolume != null) return 'Saída padrão do Windows';
+        return masterLoading
+            ? 'Procurando saída de áudio…'
+            : 'Nenhuma saída de áudio encontrada';
+    }
+
+    function onMasterVolumeInput(event: Event) {
+        const level =
+            Number((event.currentTarget as HTMLInputElement).value) / 100;
+        const wasMuted = masterMuted;
+        masterVolume = level;
+        masterMuted = false;
+        masterVolumeSyncAt = Date.now();
+        masterError = null;
+        clearTimeout(masterVolumeApplyTimer);
+        if (wasMuted) {
+            void api.setMasterMuted(false).catch(error => {
+                masterError = errorText(error);
+            });
+        }
+        masterVolumeApplyTimer = setTimeout(() => {
+            void api.setMasterVolume(level).catch(error => {
+                masterError = errorText(error);
+            });
+        }, 40);
+    }
+
+    function onMasterVolumeCommit() {
+        if (masterVolume == null) return;
+        masterVolumeSyncAt = Date.now();
+        clearTimeout(masterVolumeApplyTimer);
+        void api.setMasterVolume(masterVolume).catch(error => {
+            masterError = errorText(error);
+        });
+    }
+
+    async function toggleMasterMute() {
+        if (masterVolume == null || masterBusy) return;
+        const target = !masterMuted;
+        masterBusy = 'mute';
+        masterMuted = target;
+        masterError = null;
+        try {
+            await api.setMasterMuted(target);
+        } catch (error) {
+            masterMuted = !target;
+            masterError = errorText(error);
+        } finally {
+            masterBusy = null;
+        }
+    }
+
+    function openVolumePanel(event: MouseEvent) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (volumePanelOpen) {
+            closeVolumePanel();
+            return;
+        }
+
+        closeMenu();
+        closeWifiPanel();
+        closeMediaPanel();
+        closeBackgroundPanel();
+        hidePreview();
+        hideWorkspacePanel();
+        hideTooltipNow();
+        const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+        volumePanelLeft = Math.min(
+            Math.max(180, rect.left + rect.width / 2),
+            window.innerWidth - 180,
+        );
+        volumePanelOpen = true;
+        masterError = null;
+        void refreshMasterAudio();
+        void tick().then(() => sendRegion(true));
+    }
+
+    function closeVolumePanel() {
+        if (!volumePanelOpen) return;
+        volumePanelOpen = false;
+        masterError = null;
+        clearTimeout(masterVolumeApplyTimer);
+        scheduleRegion(hovering);
+    }
+
     function openWifiPanel(event: MouseEvent) {
         event.preventDefault();
         event.stopPropagation();
@@ -2143,6 +2558,7 @@
         }
 
         closeMenu();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -2485,6 +2901,7 @@
 
         closeMenu();
         closeWifiPanel();
+        closeVolumePanel();
         closeBackgroundPanel();
         hidePreview();
         hideWorkspacePanel();
@@ -2907,6 +3324,7 @@
 
         closeMenu();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         hidePreview();
         hideTooltipNow();
@@ -3406,10 +3824,23 @@
             </button>
 
             <button
-                class="status-btn"
+                class="status-btn sound"
+                class:is-active={volumePanelOpen}
+                class:is-muted={masterMuted || masterVolume === 0}
                 tabindex="-1"
-                title="Som"
-                onclick={() => openStatusPage('sound')}
+                title={masterMuted
+                    ? 'Som silenciado'
+                    : masterVolume == null
+                      ? 'Som'
+                      : `Som — ${Math.round(masterVolume * 100)}%`}
+                aria-label="Controle de volume"
+                onclick={openVolumePanel}
+                oncontextmenu={event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeVolumePanel();
+                    openStatusPage('sound');
+                }}
             >
                 <svg
                     viewBox="0 0 16 16"
@@ -3423,7 +3854,14 @@
                     aria-hidden="true"
                 >
                     <path d="M3 6.2h2.2L8.4 3.7v8.6L5.2 9.8H3z" />
-                    <path d="M10.8 5.7a3.4 3.4 0 0 1 0 4.6" />
+                    {#if masterMuted || masterVolume === 0}
+                        <path d="M10.9 6.1l3.4 3.8M14.3 6.1l-3.4 3.8" />
+                    {:else if (masterVolume ?? 0) < 0.45}
+                        <path d="M10.8 6.4a2.6 2.6 0 0 1 0 3.2" />
+                    {:else}
+                        <path d="M10.5 5.9a3.6 3.6 0 0 1 0 4.2" />
+                        <path d="M12.4 4.6a6.2 6.2 0 0 1 0 6.8" />
+                    {/if}
                 </svg>
             </button>
 
@@ -3496,7 +3934,7 @@
             style={`left:${previewLeft}px; bottom:${previewBottom}px`}
             onpointerenter={onPreviewEnter}
             onpointerleave={onPreviewLeave}
-            onwheel={event => event.stopPropagation()}
+            onwheel={onPreviewWheel}
         >
             <div class="preview-head">
                 {#if previewIcon}
@@ -3509,46 +3947,120 @@
                 </span>
             </div>
 
-            <div class="preview-row">
-                {#each previewWindows as window (window.hwnd)}
-                    <button
-                        class="preview-card"
-                        class:is-hovered={previewHoverHwnd === window.hwnd}
-                        title={window.title}
-                        onclick={() => openPreviewWindow(window)}
-                        onpointerenter={() => onPreviewCardEnter(window)}
-                        onpointerleave={() => onPreviewCardLeave(window)}
-                    >
-                        <span class="preview-thumb">
-                            {#if previewThumbs[window.hwnd]}
-                                <img
-                                    src={previewThumbs[window.hwnd]}
-                                    alt=""
-                                    draggable="false"
-                                />
-                            {:else if previewLoading[window.hwnd]}
-                                <span class="preview-spinner"></span>
-                            {:else if window.minimized}
-                                <span class="preview-placeholder">
-                                    Minimizada
-                                </span>
-                            {:else}
-                                <span class="preview-placeholder">
-                                    Sem prévia
-                                </span>
-                            {/if}
-                        </span>
-                        <span class="preview-title">
-                            {window.title || 'Sem título'}
-                        </span>
-                        <span
-                            class="preview-hover-hint"
-                            class:is-visible={previewHoverHwnd === window.hwnd}
+            <div class="preview-viewport">
+                <div
+                    class="preview-row"
+                    class:is-dragging={previewDragging}
+                    bind:this={previewRowEl}
+                    role="toolbar"
+                    aria-label={`Janelas de ${previewName}`}
+                    aria-orientation="horizontal"
+                    onscroll={updatePreviewScroll}
+                    onkeydown={onPreviewKeyDown}
+                    onpointerdown={onPreviewPointerDown}
+                    onpointermove={onPreviewPointerMove}
+                    onpointerup={onPreviewPointerUp}
+                    onpointercancel={onPreviewPointerCancel}
+                >
+                    {#each previewWindows as window (window.hwnd)}
+                        <button
+                            class="preview-card"
+                            class:is-hovered={previewHoverHwnd === window.hwnd}
+                            title={window.title}
+                            onclick={() => openPreviewWindow(window)}
+                            onpointerenter={() => onPreviewCardEnter(window)}
+                            onpointerleave={() => onPreviewCardLeave(window)}
+                            onfocus={() => onPreviewCardEnter(window)}
+                            onblur={() => onPreviewCardLeave(window)}
                         >
-                            Trazer para frente
-                        </span>
-                    </button>
-                {/each}
+                            <span class="preview-thumb">
+                                {#if previewThumbs[window.hwnd]}
+                                    <img
+                                        src={previewThumbs[window.hwnd]}
+                                        alt=""
+                                        draggable="false"
+                                    />
+                                {:else if previewLoading[window.hwnd]}
+                                    <span class="preview-spinner"></span>
+                                {:else if window.minimized}
+                                    <span class="preview-placeholder">
+                                        Minimizada
+                                    </span>
+                                {:else}
+                                    <span class="preview-placeholder">
+                                        Sem prévia
+                                    </span>
+                                {/if}
+                            </span>
+                            <span class="preview-title">
+                                {window.title || 'Sem título'}
+                            </span>
+                            <span
+                                class="preview-hover-hint"
+                                class:is-visible={previewHoverHwnd ===
+                                    window.hwnd}
+                            >
+                                Trazer para frente
+                            </span>
+                        </button>
+                    {/each}
+                </div>
+
+                <span
+                    class="preview-edge is-left"
+                    class:is-visible={previewCanScrollLeft}
+                    aria-hidden="true"
+                ></span>
+                <span
+                    class="preview-edge is-right"
+                    class:is-visible={previewCanScrollRight}
+                    aria-hidden="true"
+                ></span>
+
+                <button
+                    class="preview-nav is-left"
+                    class:is-visible={previewCanScrollLeft}
+                    tabindex="-1"
+                    aria-label="Janelas anteriores"
+                    title="Janelas anteriores"
+                    onclick={() => scrollPreview(-1)}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M9.8 3.5 5.3 8l4.5 4.5" />
+                    </svg>
+                </button>
+                <button
+                    class="preview-nav is-right"
+                    class:is-visible={previewCanScrollRight}
+                    tabindex="-1"
+                    aria-label="Próximas janelas"
+                    title="Próximas janelas"
+                    onclick={() => scrollPreview(1)}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M6.2 3.5 10.7 8l-4.5 4.5" />
+                    </svg>
+                </button>
             </div>
         </div>
     {/if}
@@ -3657,6 +4169,196 @@
             <i></i><i></i><i></i><i></i>
         </span>
     {/snippet}
+
+    {#if volumePanelOpen}
+        <div
+            class="wifi-backdrop"
+            onclick={closeVolumePanel}
+            oncontextmenu={event => {
+                event.preventDefault();
+                closeVolumePanel();
+            }}
+        ></div>
+
+        <div
+            class="volume-panel"
+            bind:this={volumePanelEl}
+            style={`left:${volumePanelLeft}px; bottom:${menuBottom}px`}
+            onpointerenter={clearHide}
+            onpointerleave={() => scheduleHide()}
+        >
+            <div class="volume-header">
+                <div class="volume-header-copy">
+                    <h3>Som</h3>
+                    <span>{masterStatusLabel()}</span>
+                </div>
+                <div class="volume-header-actions">
+                    <button
+                        class="icon-button"
+                        onclick={closeVolumePanel}
+                        title="Fechar"
+                    >
+                        <svg
+                            viewBox="0 0 16 16"
+                            width="13"
+                            height="13"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            aria-hidden="true"
+                        >
+                            <path d="M4 4l8 8M12 4l-8 8" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="volume-control" class:is-muted={masterMuted}>
+                <button
+                    class="volume-mute"
+                    onclick={() => void toggleMasterMute()}
+                    disabled={masterVolume == null || !!masterBusy}
+                    title={masterMuted ? 'Ativar som' : 'Silenciar'}
+                    aria-label={masterMuted ? 'Ativar som' : 'Silenciar'}
+                >
+                    <svg
+                        viewBox="0 0 24 24"
+                        width="19"
+                        height="19"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path
+                            d="M4 9.5h3.2L12 5.6v12.8l-4.8-3.9H4z"
+                            fill="currentColor"
+                            stroke="none"
+                        />
+                        {#if masterMuted}
+                            <path d="M15.8 9.4l4.4 5.2M20.2 9.4l-4.4 5.2" />
+                        {:else if (masterVolume ?? 0) < 0.45}
+                            <path d="M15.4 9.9a4 4 0 0 1 0 4.2" />
+                        {:else}
+                            <path d="M15.2 9.3a4.1 4.1 0 0 1 0 5.4" />
+                            <path d="M17.8 6.9a7.7 7.7 0 0 1 0 10.2" />
+                        {/if}
+                    </svg>
+                </button>
+
+                <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={masterMuted
+                        ? 0
+                        : Math.round((masterVolume ?? 0) * 100)}
+                    disabled={masterVolume == null}
+                    oninput={onMasterVolumeInput}
+                    onchange={onMasterVolumeCommit}
+                    style={`--volume:${masterMuted ? 0 : (masterVolume ?? 0) * 100}%`}
+                    aria-label="Volume do sistema"
+                />
+
+                <span class="volume-value">
+                    {masterMuted
+                        ? 'Mudo'
+                        : masterVolume == null
+                          ? '—'
+                          : `${Math.round(masterVolume * 100)}%`}
+                </span>
+            </div>
+
+            {#if masterError}
+                <div class="volume-error">{masterError}</div>
+            {/if}
+
+            <div class="volume-footer">
+                <button
+                    class="volume-link"
+                    onclick={() => {
+                        closeVolumePanel();
+                        openStatusPage('mixer');
+                    }}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M4 2.5v11M8 2.5v11M12 2.5v11" />
+                        <circle cx="4" cy="5.5" r="1.4" fill="currentColor" stroke="none" />
+                        <circle cx="8" cy="10" r="1.4" fill="currentColor" stroke="none" />
+                        <circle cx="12" cy="6.5" r="1.4" fill="currentColor" stroke="none" />
+                    </svg>
+                    <span>Misturador de volume</span>
+                    <svg
+                        class="volume-chevron"
+                        viewBox="0 0 16 16"
+                        width="12"
+                        height="12"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M6.5 4.5L10 8l-3.5 3.5" />
+                    </svg>
+                </button>
+
+                <button
+                    class="volume-link"
+                    onclick={() => {
+                        closeVolumePanel();
+                        openStatusPage('sound');
+                    }}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <circle cx="8" cy="8" r="2.2" />
+                        <path
+                            d="M8 1.8v1.5M8 12.7v1.5M1.8 8h1.5M12.7 8h1.5M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"
+                        />
+                    </svg>
+                    <span>Configurações de som</span>
+                    <svg
+                        class="volume-chevron"
+                        viewBox="0 0 16 16"
+                        width="12"
+                        height="12"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M6.5 4.5L10 8l-3.5 3.5" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+    {/if}
 
     {#if wifiPanelOpen}
         <div
@@ -5068,6 +5770,19 @@
         opacity: 0.55;
     }
 
+    .status-btn.sound {
+        position: relative;
+    }
+
+    .status-btn.sound.is-active {
+        background: var(--hover);
+        opacity: 1;
+    }
+
+    .status-btn.sound.is-muted {
+        opacity: 0.55;
+    }
+
     .status-online-dot {
         position: absolute;
         right: 4px;
@@ -5113,6 +5828,195 @@
             opacity: 0;
             transform: translateX(-50%) translateY(7px) scale(0.985);
         }
+    }
+
+    .volume-panel {
+        position: fixed;
+        z-index: 31;
+        display: flex;
+        width: 340px;
+        flex-direction: column;
+        padding: 15px 16px 10px;
+        transform: translateX(-50%);
+        transform-origin: bottom center;
+        border: 1px solid var(--glass-border);
+        border-radius: 20px;
+        background: var(--menu-bg);
+        box-shadow: var(--menu-shadow), inset 0 1px 0 var(--glass-inner);
+        backdrop-filter: blur(36px) saturate(180%);
+        -webkit-backdrop-filter: blur(36px) saturate(180%);
+        color: var(--text);
+        pointer-events: auto;
+        animation: volume-panel-in var(--anim-duration, 190ms)
+            cubic-bezier(0.2, 0.9, 0.25, 1);
+    }
+
+    @keyframes volume-panel-in {
+        from {
+            opacity: 0;
+            transform: translateX(-50%) translateY(7px) scale(0.985);
+        }
+    }
+
+    .volume-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 2px 2px 8px;
+    }
+
+    .volume-header-copy h3 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+    }
+
+    .volume-header-copy span {
+        display: block;
+        margin-top: 2px;
+        font-size: 10.5px;
+        color: var(--text-dim);
+    }
+
+    .volume-header-actions {
+        display: flex;
+        gap: 3px;
+    }
+
+    .volume-control {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 4px 2px 13px;
+    }
+
+    .volume-mute {
+        display: flex;
+        width: 32px;
+        height: 32px;
+        flex: none;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: var(--panel);
+        color: var(--text);
+        cursor: default;
+        transition:
+            background var(--anim-duration, 140ms) ease,
+            color var(--anim-duration, 140ms) ease;
+    }
+
+    .volume-mute:not(:disabled):hover {
+        background: var(--hover);
+    }
+
+    .volume-mute:disabled {
+        cursor: default;
+        opacity: 0.45;
+    }
+
+    .volume-control.is-muted .volume-mute {
+        color: var(--text-dim);
+        background: transparent;
+    }
+
+    .volume-control input[type='range'] {
+        width: 100%;
+        height: 4px;
+        flex: 1;
+        margin: 0;
+        appearance: none;
+        -webkit-appearance: none;
+        border-radius: 999px;
+        background: linear-gradient(
+            to right,
+            var(--accent) var(--volume, 0%),
+            var(--sep) var(--volume, 0%)
+        );
+        outline: none;
+        cursor: default;
+    }
+
+    .volume-control input[type='range']::-webkit-slider-thumb {
+        width: 12px;
+        height: 12px;
+        appearance: none;
+        -webkit-appearance: none;
+        border: 0;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+    }
+
+    .volume-control input[type='range']:disabled {
+        opacity: 0.4;
+    }
+
+    .volume-control.is-muted input[type='range'] {
+        background: linear-gradient(
+            to right,
+            var(--text-dim) var(--volume, 0%),
+            var(--sep) var(--volume, 0%)
+        );
+    }
+
+    .volume-value {
+        width: 34px;
+        flex: none;
+        color: var(--text-dim);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+    }
+
+    .volume-error {
+        margin: -5px 2px 9px;
+        color: var(--danger);
+        font-size: 10.5px;
+        line-height: 1.35;
+    }
+
+    .volume-footer {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        padding-top: 8px;
+        border-top: 1px solid var(--sep);
+    }
+
+    .volume-link {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        gap: 9px;
+        padding: 7px 8px;
+        border: 0;
+        border-radius: 9px;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 11px;
+        text-align: left;
+        cursor: default;
+    }
+
+    .volume-link:hover {
+        background: var(--hover);
+    }
+
+    .volume-link > svg:first-child {
+        flex: none;
+        color: var(--text-dim);
+    }
+
+    .volume-chevron {
+        flex: none;
+        margin-left: auto;
+        color: var(--text-dim);
     }
 
     .wifi-header {
@@ -7033,11 +7937,99 @@
         font-size: 10px;
     }
 
+    .preview-viewport {
+        position: relative;
+        min-width: 0;
+    }
+
     .preview-row {
         display: flex;
         gap: 8px;
         overflow-x: auto;
+        overscroll-behavior-x: contain;
         padding-bottom: 2px;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        user-select: none;
+    }
+
+    .preview-row::-webkit-scrollbar {
+        display: none;
+    }
+
+    .preview-row.is-dragging,
+    .preview-row.is-dragging .preview-card {
+        cursor: grabbing;
+    }
+
+    .preview-edge {
+        position: absolute;
+        top: 0;
+        bottom: 2px;
+        z-index: 1;
+        width: 34px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 140ms ease;
+    }
+
+    .preview-edge.is-left {
+        left: 0;
+        background: linear-gradient(to right, var(--menu-bg) 8%, transparent);
+    }
+
+    .preview-edge.is-right {
+        right: 0;
+        background: linear-gradient(to left, var(--menu-bg) 8%, transparent);
+    }
+
+    .preview-edge.is-visible {
+        opacity: 1;
+    }
+
+    .preview-nav {
+        position: absolute;
+        top: 50%;
+        z-index: 2;
+        display: grid;
+        width: 26px;
+        height: 52px;
+        place-items: center;
+        padding: 0;
+        border: 1px solid var(--glass-border);
+        border-radius: 999px;
+        background: var(--dock-bg);
+        box-shadow:
+            0 8px 20px rgba(0, 0, 0, 0.24),
+            inset 0 1px 0 var(--glass-inner);
+        color: var(--text);
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(-50%) scale(0.94);
+        transition:
+            opacity 120ms ease,
+            transform 120ms ease,
+            border-color 120ms ease,
+            color 120ms ease;
+    }
+
+    .preview-nav.is-visible {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(-50%) scale(1);
+    }
+
+    .preview-nav:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    .preview-nav.is-left {
+        left: -4px;
+    }
+
+    .preview-nav.is-right {
+        right: -4px;
     }
 
     .preview-card {
@@ -7065,6 +8057,11 @@
         border-color: var(--accent);
         background: var(--hover);
         box-shadow: 0 0 0 1px var(--accent-soft);
+    }
+
+    .preview-card:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
     }
 
     .preview-card:only-child {

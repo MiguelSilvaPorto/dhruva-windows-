@@ -1,5 +1,6 @@
 use serde::Serialize;
 use windows::core::Interface;
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2,
     IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
@@ -13,6 +14,13 @@ use super::util::normalize_title;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioState {
+    pub volume: f32,
+    pub muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MasterAudioState {
     pub volume: f32,
     pub muted: bool,
 }
@@ -48,6 +56,18 @@ unsafe fn session_manager() -> Option<IAudioSessionManager2> {
         .GetDefaultAudioEndpoint(eRender, eConsole)
         .ok()?;
     device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None).ok()
+}
+
+unsafe fn endpoint_volume() -> Option<IAudioEndpointVolume> {
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    let enumerator: IMMDeviceEnumerator =
+        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+    let device = enumerator
+        .GetDefaultAudioEndpoint(eRender, eConsole)
+        .ok()?;
+    device
+        .Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+        .ok()
 }
 
 unsafe fn display_name(control: &IAudioSessionControl) -> String {
@@ -138,5 +158,30 @@ pub fn set_volume(level: f32) -> Result<(), String> {
 
 pub fn set_muted(muted: bool) -> Result<(), String> {
     let volume = unsafe { current_session() }.ok_or_else(|| "Sessão de áudio não encontrada".to_string())?;
+    unsafe { volume.SetMute(muted, std::ptr::null()) }.map_err(|error| error.to_string())
+}
+
+pub fn master_state() -> Option<MasterAudioState> {
+    let volume = unsafe { endpoint_volume() }?;
+    let level = unsafe { volume.GetMasterVolumeLevelScalar().ok()? };
+    let muted = unsafe { volume.GetMute().ok()?.as_bool() };
+    Some(MasterAudioState {
+        volume: level.clamp(0.0, 1.0),
+        muted,
+    })
+}
+
+pub fn set_master_volume(level: f32) -> Result<(), String> {
+    let volume = unsafe { endpoint_volume() }
+        .ok_or_else(|| "Dispositivo de saída não encontrado".to_string())?;
+    unsafe {
+        volume.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null())
+    }
+    .map_err(|error| error.to_string())
+}
+
+pub fn set_master_muted(muted: bool) -> Result<(), String> {
+    let volume = unsafe { endpoint_volume() }
+        .ok_or_else(|| "Dispositivo de saída não encontrado".to_string())?;
     unsafe { volume.SetMute(muted, std::ptr::null()) }.map_err(|error| error.to_string())
 }

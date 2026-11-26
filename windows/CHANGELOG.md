@@ -12,10 +12,13 @@
 - Launcher com busca em janelas abertas, previews de mídia compactos e pastas na dock.
 - Prévia ao vivo da mídia: clicar na capa abre um quadro ao vivo do vídeo; em navegadores, a aba correspondente é ativada e restaurada ao fechar.
 - Controle de volume e mudo por aplicativo no painel de mídia, independente do volume do Windows.
+- Controle rápido do volume do sistema: clicar no ícone de som abre um painel com volume mestre, mudo, misturador de volume e configurações de som do Windows.
 - Controle de tempo preciso: sincroniza a posição com o player do navegador, permite arrastar a barra e pular 10 segundos.
+- Prévia de janelas navegável na horizontal: roda do mouse, arraste, setas laterais e teclas de direção percorrem todas as janelas do aplicativo.
 
 ### Corrigido
 
+- A prévia de janelas da dock carrega bem mais rápido: as miniaturas começam a ser capturadas assim que o ponteiro para no ícone, trafegam em JPEG compacto e reaparecem na hora enquanto uma nova captura é feita em segundo plano.
 - A dock volta a reservar a área da tela ao ser exibida e depois do desbloqueio; janelas maximizadas não ficam mais por baixo dela.
 - Passar o mouse pela prévia de uma janela não traz mais o aplicativo para frente; somente o clique ativa a janela.
 - A prévia de mídia volta a encontrar a janela do vídeo mesmo quando o Windows entrega a sessão sem título; o painel usa o título/aplicativo que está exibindo como referência.

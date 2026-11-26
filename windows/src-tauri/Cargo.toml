@@ -29,6 +29,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_WiFi",
@@ -56,3 +57,12 @@ base64 = "0.22"
 log = "0.4"
 simplelog = "0.12"
 anyhow = "1"
+
+# The window preview crops and resizes every captured frame. That crate is
+# unusably slow in an unoptimized build (about 1 s per thumbnail), so it is
+# always compiled with optimizations, even in dev and test profiles.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.test.package.image]
+opt-level = 3

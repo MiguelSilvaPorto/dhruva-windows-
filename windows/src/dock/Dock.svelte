@@ -205,7 +205,6 @@
     let previewSeq = 0;
     let previewHover = false;
     let previewHoverHwnd = $state<number | null>(null);
-    let previewFocusTimer: ReturnType<typeof setTimeout> | undefined;
     let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
     const previewCache = new Map<
         number,
@@ -1335,7 +1334,6 @@
 
     function hidePreview() {
         clearTimeout(previewHideTimer);
-        clearTimeout(previewFocusTimer);
         previewHoverHwnd = null;
         if (!previewOpen) return;
         previewOpen = false;
@@ -1353,31 +1351,22 @@
 
     function onPreviewLeave() {
         previewHover = false;
-        clearTimeout(previewFocusTimer);
         previewHoverHwnd = null;
         schedulePreviewHide();
     }
 
     function onPreviewCardEnter(window: WindowInfo) {
         previewHoverHwnd = window.hwnd;
-        clearTimeout(previewFocusTimer);
-        previewFocusTimer = setTimeout(() => {
-            if (previewOpen && previewHoverHwnd === window.hwnd) {
-                bringPreviewWindow(window, true);
-            }
-        }, 300);
     }
 
     function onPreviewCardLeave(window: WindowInfo) {
         if (previewHoverHwnd !== window.hwnd) return;
-        clearTimeout(previewFocusTimer);
         previewHoverHwnd = null;
     }
 
-    function bringPreviewWindow(window: WindowInfo, fromHover = false) {
-        clearTimeout(previewFocusTimer);
+    function bringPreviewWindow(window: WindowInfo) {
         previewHoverHwnd = null;
-        if (!fromHover) hidePreview();
+        hidePreview();
         hideTooltipNow();
         void api
             .focusWindow(window.hwnd)

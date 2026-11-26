@@ -17,6 +17,7 @@
 ### Corrigido
 
 - A dock volta a reservar a área da tela ao ser exibida e depois do desbloqueio; janelas maximizadas não ficam mais por baixo dela.
+- Passar o mouse pela prévia de uma janela não traz mais o aplicativo para frente; somente o clique ativa a janela.
 - A tecla Windows não abre mais o menu Iniciar nativo; o foco volta ao aplicativo anterior ao fechar a pesquisa.
 - Win+Q e Win+S abrem a pesquisa do Dhruva em vez da pesquisa nativa do Windows.
 - Cliques repetidos na tecla Windows não dessincronizam mais o launcher: as alternâncias são processadas em ordem.

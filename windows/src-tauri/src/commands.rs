@@ -324,8 +324,11 @@ pub fn media_art() -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn media_preview_start() -> Option<win::media::PreviewSession> {
-    tauri::async_runtime::spawn_blocking(win::media::preview_start)
+pub async fn media_preview_start(
+    title: Option<String>,
+    app: Option<String>,
+) -> Option<win::media::PreviewSession> {
+    tauri::async_runtime::spawn_blocking(move || win::media::preview_start(title, app))
         .await
         .ok()
         .flatten()

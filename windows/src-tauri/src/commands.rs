@@ -343,6 +343,33 @@ pub async fn media_preview_stop(selection: win::accessibility::TabSelection) -> 
 }
 
 #[tauri::command]
+pub fn set_media_thumbnail(
+    window: tauri::WebviewWindow,
+    source: i64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    visible: bool,
+) -> bool {
+    if !visible || source == 0 {
+        win::thumbnail::hide();
+        return true;
+    }
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let position = window
+        .outer_position()
+        .unwrap_or(tauri::PhysicalPosition::new(0, 0));
+    let px = position.x + ((x + 1.0) * scale).round() as i32;
+    let py = position.y + ((y + 1.0) * scale).round() as i32;
+    let pw = ((width - 2.0) * scale).round().max(8.0) as i32;
+    let ph = ((height - 2.0) * scale).round().max(8.0) as i32;
+
+    win::thumbnail::show(source, px, py, pw, ph)
+}
+
+#[tauri::command]
 pub async fn media_audio() -> Option<win::audio::AudioState> {
     tauri::async_runtime::spawn_blocking(win::audio::state)
         .await

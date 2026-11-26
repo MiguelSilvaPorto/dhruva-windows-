@@ -20,6 +20,7 @@ pub mod region;
 pub mod shell;
 pub mod taskbar;
 pub mod theme;
+pub mod thumbnail;
 pub mod util;
 pub mod virtual_desktops;
 pub mod wifi;

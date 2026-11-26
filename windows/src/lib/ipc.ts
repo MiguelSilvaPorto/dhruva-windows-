@@ -41,6 +41,22 @@ export const api = {
         invoke<void>('set_media_volume', { volume }),
     setMediaMuted: (muted: boolean) =>
         invoke<void>('set_media_muted', { muted }),
+    setMediaThumbnail: (
+        source: number,
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        visible: boolean,
+    ) =>
+        invoke<boolean>('set_media_thumbnail', {
+            source,
+            x,
+            y,
+            width,
+            height,
+            visible,
+        }),
     mediaControl: (action: string, positionMs?: number) =>
         invoke<void>('media_control', {
             action,

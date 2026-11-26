@@ -142,6 +142,8 @@
     let mediaVolumeApplyTimer: ReturnType<typeof setTimeout> | undefined;
     let mediaPreviewOpen = $state(false);
     let mediaPreviewFrame = $state<string | null>(null);
+    let mediaPreviewNative = $state(false);
+    let mediaLiveSurfaceEl = $state<HTMLDivElement | null>(null);
     let mediaPreviewResolving = $state(false);
     let mediaPreviewMissing = $state(false);
     let mediaPreviewHwnd: number | null = null;
@@ -681,6 +683,26 @@
         if (artKey === mediaTimelineKey) return;
         mediaTimelineKey = artKey;
         void syncMediaTimeline(false);
+    });
+
+    $effect(() => {
+        if (!mediaPreviewNative || mediaPreviewHwnd == null) return;
+        mediaPanelLeft;
+        void tick().then(() => {
+            const rect = mediaLiveSurfaceEl?.getBoundingClientRect();
+            if (mediaPreviewNative && mediaPreviewHwnd != null && rect) {
+                void api
+                    .setMediaThumbnail(
+                        mediaPreviewHwnd,
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                        true,
+                    )
+                    .catch(() => {});
+            }
+        });
     });
 
     $effect(() => {
@@ -2553,14 +2575,7 @@
                 mediaPreviewFrame = frame;
             }
         } catch {
-            // A frame may fail while the window is being resized or redrawn.
-        }
-
-        if (seq === mediaPreviewSeq && mediaPreviewOpen && mediaPreviewHwnd != null) {
-            mediaPreviewTimer = setTimeout(
-                () => void captureMediaPreview(seq),
-                110,
-            );
+            // The fallback is a single still frame, not a slow capture loop.
         }
     }
 
@@ -2594,6 +2609,40 @@
 
         mediaPreviewHwnd = target.hwnd;
         mediaPreviewTab = target.tab;
+        mediaPreviewNative = false;
+        void api.setMediaThumbnail(0, 0, 0, 0, 0, false).catch(() => {});
+
+        await tick();
+        const rect = mediaLiveSurfaceEl?.getBoundingClientRect();
+        if (rect) {
+            const native = await api
+                .setMediaThumbnail(
+                    target.hwnd,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    true,
+                )
+                .catch(() => false);
+
+            if (seq !== mediaPreviewSeq || !mediaPreviewOpen) {
+                void api
+                    .setMediaThumbnail(0, 0, 0, 0, 0, false)
+                    .catch(() => {});
+                return;
+            }
+
+            if (native) {
+                mediaPreviewNative = true;
+                setTimeout(() => void syncMediaTimeline(false), 500);
+                return;
+            }
+
+            void api.setMediaThumbnail(0, 0, 0, 0, 0, false).catch(() => {});
+        }
+
+        mediaPreviewNative = false;
         setTimeout(() => void syncMediaTimeline(false), 500);
         mediaPreviewTimer = setTimeout(
             () => void captureMediaPreview(seq),
@@ -2627,6 +2676,9 @@
         } else {
             mediaPreviewTab = null;
         }
+
+        mediaPreviewNative = false;
+        void api.setMediaThumbnail(0, 0, 0, 0, 0, false).catch(() => {});
 
         if (mediaPreviewTimer) clearTimeout(mediaPreviewTimer);
         mediaPreviewTimer = undefined;
@@ -4099,6 +4151,12 @@
                             <img src={mediaSourceIcon} alt="" draggable="false" />
                         {/if}
                         {media.app ?? 'Mídia'}
+                        {#if mediaPreviewOpen}
+                            <span class="media-live-tag">
+                                <span class="media-live-dot"></span>
+                                AO VIVO
+                            </span>
+                        {/if}
                     </span>
                     <strong>{media.title ?? 'Sem título'}</strong>
                     <span>{media.artist ?? 'Artista desconhecido'}</span>
@@ -4129,34 +4187,46 @@
 
             {#if mediaPreviewOpen}
                 <div class="media-live">
-                    {#if mediaPreviewFrame}
+                    <div
+                        class="media-live-surface"
+                        bind:this={mediaLiveSurfaceEl}
+                    >
+                        {#if !mediaPreviewNative}
+                            {#if mediaPreviewFrame}
+                                <button
+                                    class="media-live-frame"
+                                    onclick={openMediaPreviewWindow}
+                                    title="Abrir no {media.app ?? 'aplicativo'}"
+                                >
+                                    <img
+                                        src={mediaPreviewFrame}
+                                        alt="Prévia ao vivo"
+                                        draggable="false"
+                                    />
+                                </button>
+                            {:else if mediaPreviewResolving}
+                                <div class="media-live-empty">
+                                    Procurando a janela do vídeo…
+                                </div>
+                            {:else if mediaPreviewMissing}
+                                <div class="media-live-empty">
+                                    Não encontrei a janela do vídeo.
+                                </div>
+                            {:else}
+                                <div class="media-live-empty">
+                                    Conectando à janela do vídeo…
+                                </div>
+                            {/if}
+                        {/if}
+                    </div>
+
+                    {#if mediaPreviewNative}
                         <button
-                            class="media-live-frame"
+                            class="media-live-hit"
                             onclick={openMediaPreviewWindow}
                             title="Abrir no {media.app ?? 'aplicativo'}"
-                        >
-                            <img
-                                src={mediaPreviewFrame}
-                                alt="Prévia ao vivo"
-                                draggable="false"
-                            />
-                            <span class="media-live-badge">
-                                <span class="media-live-dot"></span>
-                                AO VIVO
-                            </span>
-                        </button>
-                    {:else if mediaPreviewResolving}
-                        <div class="media-live-empty">
-                            Procurando a janela do vídeo…
-                        </div>
-                    {:else if mediaPreviewMissing}
-                        <div class="media-live-empty">
-                            Não encontrei a janela do vídeo.
-                        </div>
-                    {:else}
-                        <div class="media-live-empty">
-                            Conectando à janela do vídeo…
-                        </div>
+                            aria-label="Abrir no {media.app ?? 'aplicativo'}"
+                        ></button>
                     {/if}
                 </div>
             {/if}
@@ -5891,21 +5961,32 @@
     }
 
     .media-live {
+        position: relative;
         margin-bottom: 12px;
     }
 
-    .media-live-frame {
+    .media-live-surface {
         position: relative;
-        display: block;
         width: 100%;
         aspect-ratio: 16 / 9;
         overflow: hidden;
-        padding: 0;
         border: 1px solid var(--glass-border);
         border-radius: 12px;
         background: #000;
-        cursor: pointer;
         box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+    }
+
+    .media-live-frame {
+        position: absolute;
+        inset: 0;
+        display: block;
+        width: 100%;
+        height: 100%;
+        padding: 0;
+        border: 0;
+        border-radius: inherit;
+        background: transparent;
+        cursor: pointer;
     }
 
     .media-live-frame img {
@@ -5915,21 +5996,30 @@
         object-fit: cover;
     }
 
-    .media-live-badge {
+    .media-live-hit {
         position: absolute;
-        top: 7px;
-        left: 7px;
-        display: flex;
+        inset: 0;
+        z-index: 2;
+        width: 100%;
+        height: 100%;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        cursor: pointer;
+    }
+
+    .media-live-tag {
+        display: inline-flex;
         align-items: center;
         gap: 4px;
-        padding: 3px 7px;
+        margin-left: 5px;
+        padding: 1px 5px;
         border-radius: 999px;
-        background: rgba(0, 0, 0, 0.62);
-        color: #fff;
+        background: rgba(255, 77, 79, 0.16);
+        color: #ff6b6d;
         font-size: 8px;
         font-weight: 700;
         letter-spacing: 0.08em;
-        backdrop-filter: blur(4px);
     }
 
     .media-live-dot {
@@ -5941,13 +6031,12 @@
     }
 
     .media-live-empty {
+        position: absolute;
+        inset: 0;
         display: flex;
-        height: 185px;
         align-items: center;
         justify-content: center;
         padding: 12px;
-        border: 1px dashed var(--glass-border);
-        border-radius: 12px;
         color: var(--text-dim);
         font-size: 11px;
         text-align: center;

@@ -17,6 +17,7 @@
     import type {
         AppEntry,
         BackgroundApp,
+        MasterAudio,
         MediaStatus,
         MediaPreviewTab,
         Settings,
@@ -115,6 +116,17 @@
     let wifiForgetFor = $state<string | null>(null);
     let wifiSeq = 0;
     let wifiForgetTimer: ReturnType<typeof setTimeout> | undefined;
+
+    let volumePanelOpen = $state(false);
+    let volumePanelEl = $state<HTMLDivElement | null>(null);
+    let volumePanelLeft = $state(0);
+    let masterVolume = $state<number | null>(null);
+    let masterMuted = $state(false);
+    let masterError = $state<string | null>(null);
+    let masterLoading = $state(true);
+    let masterBusy = $state<string | null>(null);
+    let masterVolumeSyncAt = 0;
+    let masterVolumeApplyTimer: ReturnType<typeof setTimeout> | undefined;
 
     let media = $state<MediaStatus | null>(null);
     let mediaArt = $state<string | null>(null);
@@ -660,6 +672,19 @@
     });
 
     $effect(() => {
+        if (!volumePanelOpen) return;
+        void refreshMasterAudio();
+        const timer = setInterval(() => void refreshMasterAudio(), 1200);
+        return () => clearInterval(timer);
+    });
+
+    $effect(() => {
+        if (!volumePanelOpen) return;
+        masterError;
+        void tick().then(() => sendRegion(true));
+    });
+
+    $effect(() => {
         if (!mediaOpen) return;
         mediaArt;
         media?.title;
@@ -745,6 +770,7 @@
         const dismissOverlays = (source?: string) => {
             if (source === currentWindowLabel) return;
             if (wifiPanelOpen) closeWifiPanel();
+            if (volumePanelOpen) closeVolumePanel();
             if (mediaOpen) closeMediaPanel();
             if (bgPanelOpen) closeBackgroundPanel();
             if (menu) closeMenu();
@@ -765,6 +791,7 @@
             if (event.key !== 'Escape') return;
             if (wifiPasswordFor) cancelWifiPassword();
             else if (wifiPanelOpen) closeWifiPanel();
+            else if (volumePanelOpen) closeVolumePanel();
             else if (mediaOpen) closeMediaPanel();
             else if (bgPanelOpen) closeBackgroundPanel();
             else if (menu) closeMenu();
@@ -820,12 +847,18 @@
         refreshStatus();
         void loadWifiStatus(false);
         void refreshMedia();
+        void refreshMasterAudio();
         void refreshDesktopIndicator();
         const statusTimer = setInterval(refreshStatus, 30000);
         const desktopTimer = setInterval(refreshDesktopIndicator, 800);
         const wifiTimer = setInterval(() => {
             if (!wifiPanelOpen) void loadWifiStatus(false);
         }, 30000);
+        const masterTimer = setInterval(() => {
+            if (!volumePanelOpen && Date.now() - masterVolumeSyncAt > 1200) {
+                void refreshMasterAudio();
+            }
+        }, 20000);
         const mediaTimer = setInterval(() => {
             void refreshMedia();
         }, 1000);
@@ -863,6 +896,7 @@
             clearInterval(statusTimer);
             clearInterval(desktopTimer);
             clearInterval(wifiTimer);
+            clearInterval(masterTimer);
             clearInterval(mediaTimer);
             clearInterval(mediaProgressTimer);
             clearInterval(clockTimer);
@@ -985,6 +1019,17 @@
             });
         }
 
+        const volumeRect = volumePanelEl?.getBoundingClientRect();
+        if (volumePanelOpen && volumeRect && volumeRect.width > 0) {
+            rects.push({
+                x: volumeRect.left - 10,
+                y: volumeRect.top - 10,
+                w: volumeRect.width + 20,
+                h: volumeRect.height + 20,
+                radius: 22,
+            });
+        }
+
         const mediaRect = mediaPanelEl?.getBoundingClientRect();
         if (mediaOpen && mediaRect && mediaRect.width > 0) {
             rects.push({
@@ -1051,6 +1096,7 @@
             !settings.autoHide ||
             menu ||
             wifiPanelOpen ||
+            volumePanelOpen ||
             mediaOpen ||
             bgPanelOpen ||
             draggingKey
@@ -1061,6 +1107,7 @@
                 !hovering &&
                 !menu &&
                 !wifiPanelOpen &&
+                !volumePanelOpen &&
                 !mediaOpen &&
                 !bgPanelOpen
             )
@@ -1079,6 +1126,8 @@
         wifiPasswordFor = null;
         wifiPassword = '';
         wifiForgetFor = null;
+        volumePanelOpen = false;
+        masterError = null;
         mediaOpen = false;
         bgPanelOpen = false;
         bgConfirmPid = null;
@@ -1652,6 +1701,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -1696,6 +1746,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -1733,6 +1784,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -1775,6 +1827,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -1870,6 +1923,7 @@
     function closeAllDockPanels() {
         closeMenu();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -2041,6 +2095,7 @@
         event.preventDefault();
         event.stopPropagation();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -2064,6 +2119,7 @@
     function openActionCenter() {
         closeMenu();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -2111,6 +2167,117 @@
         void loadWifiStatus(true);
     }
 
+    function applyMasterAudio(audio: MasterAudio | null) {
+        if (!audio) {
+            masterVolume = null;
+            return;
+        }
+        // The slider is the source of truth while the user drags it.
+        if (Date.now() - masterVolumeSyncAt < 900) return;
+        masterVolume = audio.volume;
+        masterMuted = audio.muted;
+    }
+
+    async function refreshMasterAudio() {
+        if (masterVolume == null) masterLoading = true;
+        try {
+            applyMasterAudio(await api.getMasterAudio());
+        } catch (error) {
+            if (volumePanelOpen) masterError = errorText(error);
+        } finally {
+            masterLoading = false;
+        }
+    }
+
+    function masterStatusLabel(): string {
+        if (masterMuted) return 'Silenciado';
+        if (masterVolume != null) return 'Saída padrão do Windows';
+        return masterLoading
+            ? 'Procurando saída de áudio…'
+            : 'Nenhuma saída de áudio encontrada';
+    }
+
+    function onMasterVolumeInput(event: Event) {
+        const level =
+            Number((event.currentTarget as HTMLInputElement).value) / 100;
+        const wasMuted = masterMuted;
+        masterVolume = level;
+        masterMuted = false;
+        masterVolumeSyncAt = Date.now();
+        masterError = null;
+        clearTimeout(masterVolumeApplyTimer);
+        if (wasMuted) {
+            void api.setMasterMuted(false).catch(error => {
+                masterError = errorText(error);
+            });
+        }
+        masterVolumeApplyTimer = setTimeout(() => {
+            void api.setMasterVolume(level).catch(error => {
+                masterError = errorText(error);
+            });
+        }, 40);
+    }
+
+    function onMasterVolumeCommit() {
+        if (masterVolume == null) return;
+        masterVolumeSyncAt = Date.now();
+        clearTimeout(masterVolumeApplyTimer);
+        void api.setMasterVolume(masterVolume).catch(error => {
+            masterError = errorText(error);
+        });
+    }
+
+    async function toggleMasterMute() {
+        if (masterVolume == null || masterBusy) return;
+        const target = !masterMuted;
+        masterBusy = 'mute';
+        masterMuted = target;
+        masterError = null;
+        try {
+            await api.setMasterMuted(target);
+        } catch (error) {
+            masterMuted = !target;
+            masterError = errorText(error);
+        } finally {
+            masterBusy = null;
+        }
+    }
+
+    function openVolumePanel(event: MouseEvent) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (volumePanelOpen) {
+            closeVolumePanel();
+            return;
+        }
+
+        closeMenu();
+        closeWifiPanel();
+        closeMediaPanel();
+        closeBackgroundPanel();
+        hidePreview();
+        hideWorkspacePanel();
+        hideTooltipNow();
+        const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+        volumePanelLeft = Math.min(
+            Math.max(180, rect.left + rect.width / 2),
+            window.innerWidth - 180,
+        );
+        volumePanelOpen = true;
+        masterError = null;
+        void refreshMasterAudio();
+        void tick().then(() => sendRegion(true));
+    }
+
+    function closeVolumePanel() {
+        if (!volumePanelOpen) return;
+        volumePanelOpen = false;
+        masterError = null;
+        clearTimeout(masterVolumeApplyTimer);
+        scheduleRegion(hovering);
+    }
+
     function openWifiPanel(event: MouseEvent) {
         event.preventDefault();
         event.stopPropagation();
@@ -2121,6 +2288,7 @@
         }
 
         closeMenu();
+        closeVolumePanel();
         closeMediaPanel();
         closeBackgroundPanel();
         hidePreview();
@@ -2463,6 +2631,7 @@
 
         closeMenu();
         closeWifiPanel();
+        closeVolumePanel();
         closeBackgroundPanel();
         hidePreview();
         hideWorkspacePanel();
@@ -2853,6 +3022,7 @@
 
         closeMenu();
         closeWifiPanel();
+        closeVolumePanel();
         closeMediaPanel();
         hidePreview();
         hideTooltipNow();
@@ -3352,10 +3522,23 @@
             </button>
 
             <button
-                class="status-btn"
+                class="status-btn sound"
+                class:is-active={volumePanelOpen}
+                class:is-muted={masterMuted || masterVolume === 0}
                 tabindex="-1"
-                title="Som"
-                onclick={() => openStatusPage('sound')}
+                title={masterMuted
+                    ? 'Som silenciado'
+                    : masterVolume == null
+                      ? 'Som'
+                      : `Som — ${Math.round(masterVolume * 100)}%`}
+                aria-label="Controle de volume"
+                onclick={openVolumePanel}
+                oncontextmenu={event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeVolumePanel();
+                    openStatusPage('sound');
+                }}
             >
                 <svg
                     viewBox="0 0 16 16"
@@ -3369,7 +3552,14 @@
                     aria-hidden="true"
                 >
                     <path d="M3 6.2h2.2L8.4 3.7v8.6L5.2 9.8H3z" />
-                    <path d="M10.8 5.7a3.4 3.4 0 0 1 0 4.6" />
+                    {#if masterMuted || masterVolume === 0}
+                        <path d="M10.9 6.1l3.4 3.8M14.3 6.1l-3.4 3.8" />
+                    {:else if (masterVolume ?? 0) < 0.45}
+                        <path d="M10.8 6.4a2.6 2.6 0 0 1 0 3.2" />
+                    {:else}
+                        <path d="M10.5 5.9a3.6 3.6 0 0 1 0 4.2" />
+                        <path d="M12.4 4.6a6.2 6.2 0 0 1 0 6.8" />
+                    {/if}
                 </svg>
             </button>
 
@@ -3603,6 +3793,196 @@
             <i></i><i></i><i></i><i></i>
         </span>
     {/snippet}
+
+    {#if volumePanelOpen}
+        <div
+            class="wifi-backdrop"
+            onclick={closeVolumePanel}
+            oncontextmenu={event => {
+                event.preventDefault();
+                closeVolumePanel();
+            }}
+        ></div>
+
+        <div
+            class="volume-panel"
+            bind:this={volumePanelEl}
+            style={`left:${volumePanelLeft}px; bottom:${menuBottom}px`}
+            onpointerenter={clearHide}
+            onpointerleave={() => scheduleHide()}
+        >
+            <div class="volume-header">
+                <div class="volume-header-copy">
+                    <h3>Som</h3>
+                    <span>{masterStatusLabel()}</span>
+                </div>
+                <div class="volume-header-actions">
+                    <button
+                        class="icon-button"
+                        onclick={closeVolumePanel}
+                        title="Fechar"
+                    >
+                        <svg
+                            viewBox="0 0 16 16"
+                            width="13"
+                            height="13"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            aria-hidden="true"
+                        >
+                            <path d="M4 4l8 8M12 4l-8 8" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="volume-control" class:is-muted={masterMuted}>
+                <button
+                    class="volume-mute"
+                    onclick={() => void toggleMasterMute()}
+                    disabled={masterVolume == null || !!masterBusy}
+                    title={masterMuted ? 'Ativar som' : 'Silenciar'}
+                    aria-label={masterMuted ? 'Ativar som' : 'Silenciar'}
+                >
+                    <svg
+                        viewBox="0 0 24 24"
+                        width="19"
+                        height="19"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path
+                            d="M4 9.5h3.2L12 5.6v12.8l-4.8-3.9H4z"
+                            fill="currentColor"
+                            stroke="none"
+                        />
+                        {#if masterMuted}
+                            <path d="M15.8 9.4l4.4 5.2M20.2 9.4l-4.4 5.2" />
+                        {:else if (masterVolume ?? 0) < 0.45}
+                            <path d="M15.4 9.9a4 4 0 0 1 0 4.2" />
+                        {:else}
+                            <path d="M15.2 9.3a4.1 4.1 0 0 1 0 5.4" />
+                            <path d="M17.8 6.9a7.7 7.7 0 0 1 0 10.2" />
+                        {/if}
+                    </svg>
+                </button>
+
+                <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={masterMuted
+                        ? 0
+                        : Math.round((masterVolume ?? 0) * 100)}
+                    disabled={masterVolume == null}
+                    oninput={onMasterVolumeInput}
+                    onchange={onMasterVolumeCommit}
+                    style={`--volume:${masterMuted ? 0 : (masterVolume ?? 0) * 100}%`}
+                    aria-label="Volume do sistema"
+                />
+
+                <span class="volume-value">
+                    {masterMuted
+                        ? 'Mudo'
+                        : masterVolume == null
+                          ? '—'
+                          : `${Math.round(masterVolume * 100)}%`}
+                </span>
+            </div>
+
+            {#if masterError}
+                <div class="volume-error">{masterError}</div>
+            {/if}
+
+            <div class="volume-footer">
+                <button
+                    class="volume-link"
+                    onclick={() => {
+                        closeVolumePanel();
+                        openStatusPage('mixer');
+                    }}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M4 2.5v11M8 2.5v11M12 2.5v11" />
+                        <circle cx="4" cy="5.5" r="1.4" fill="currentColor" stroke="none" />
+                        <circle cx="8" cy="10" r="1.4" fill="currentColor" stroke="none" />
+                        <circle cx="12" cy="6.5" r="1.4" fill="currentColor" stroke="none" />
+                    </svg>
+                    <span>Misturador de volume</span>
+                    <svg
+                        class="volume-chevron"
+                        viewBox="0 0 16 16"
+                        width="12"
+                        height="12"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M6.5 4.5L10 8l-3.5 3.5" />
+                    </svg>
+                </button>
+
+                <button
+                    class="volume-link"
+                    onclick={() => {
+                        closeVolumePanel();
+                        openStatusPage('sound');
+                    }}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <circle cx="8" cy="8" r="2.2" />
+                        <path
+                            d="M8 1.8v1.5M8 12.7v1.5M1.8 8h1.5M12.7 8h1.5M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"
+                        />
+                    </svg>
+                    <span>Configurações de som</span>
+                    <svg
+                        class="volume-chevron"
+                        viewBox="0 0 16 16"
+                        width="12"
+                        height="12"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M6.5 4.5L10 8l-3.5 3.5" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+    {/if}
 
     {#if wifiPanelOpen}
         <div
@@ -4996,6 +5376,19 @@
         opacity: 0.55;
     }
 
+    .status-btn.sound {
+        position: relative;
+    }
+
+    .status-btn.sound.is-active {
+        background: var(--hover);
+        opacity: 1;
+    }
+
+    .status-btn.sound.is-muted {
+        opacity: 0.55;
+    }
+
     .status-online-dot {
         position: absolute;
         right: 4px;
@@ -5041,6 +5434,195 @@
             opacity: 0;
             transform: translateX(-50%) translateY(7px) scale(0.985);
         }
+    }
+
+    .volume-panel {
+        position: fixed;
+        z-index: 31;
+        display: flex;
+        width: 340px;
+        flex-direction: column;
+        padding: 15px 16px 10px;
+        transform: translateX(-50%);
+        transform-origin: bottom center;
+        border: 1px solid var(--glass-border);
+        border-radius: 20px;
+        background: var(--menu-bg);
+        box-shadow: var(--menu-shadow), inset 0 1px 0 var(--glass-inner);
+        backdrop-filter: blur(36px) saturate(180%);
+        -webkit-backdrop-filter: blur(36px) saturate(180%);
+        color: var(--text);
+        pointer-events: auto;
+        animation: volume-panel-in var(--anim-duration, 190ms)
+            cubic-bezier(0.2, 0.9, 0.25, 1);
+    }
+
+    @keyframes volume-panel-in {
+        from {
+            opacity: 0;
+            transform: translateX(-50%) translateY(7px) scale(0.985);
+        }
+    }
+
+    .volume-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 2px 2px 8px;
+    }
+
+    .volume-header-copy h3 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+    }
+
+    .volume-header-copy span {
+        display: block;
+        margin-top: 2px;
+        font-size: 10.5px;
+        color: var(--text-dim);
+    }
+
+    .volume-header-actions {
+        display: flex;
+        gap: 3px;
+    }
+
+    .volume-control {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 4px 2px 13px;
+    }
+
+    .volume-mute {
+        display: flex;
+        width: 32px;
+        height: 32px;
+        flex: none;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: var(--panel);
+        color: var(--text);
+        cursor: default;
+        transition:
+            background var(--anim-duration, 140ms) ease,
+            color var(--anim-duration, 140ms) ease;
+    }
+
+    .volume-mute:not(:disabled):hover {
+        background: var(--hover);
+    }
+
+    .volume-mute:disabled {
+        cursor: default;
+        opacity: 0.45;
+    }
+
+    .volume-control.is-muted .volume-mute {
+        color: var(--text-dim);
+        background: transparent;
+    }
+
+    .volume-control input[type='range'] {
+        width: 100%;
+        height: 4px;
+        flex: 1;
+        margin: 0;
+        appearance: none;
+        -webkit-appearance: none;
+        border-radius: 999px;
+        background: linear-gradient(
+            to right,
+            var(--accent) var(--volume, 0%),
+            var(--sep) var(--volume, 0%)
+        );
+        outline: none;
+        cursor: default;
+    }
+
+    .volume-control input[type='range']::-webkit-slider-thumb {
+        width: 12px;
+        height: 12px;
+        appearance: none;
+        -webkit-appearance: none;
+        border: 0;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+    }
+
+    .volume-control input[type='range']:disabled {
+        opacity: 0.4;
+    }
+
+    .volume-control.is-muted input[type='range'] {
+        background: linear-gradient(
+            to right,
+            var(--text-dim) var(--volume, 0%),
+            var(--sep) var(--volume, 0%)
+        );
+    }
+
+    .volume-value {
+        width: 34px;
+        flex: none;
+        color: var(--text-dim);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+    }
+
+    .volume-error {
+        margin: -5px 2px 9px;
+        color: var(--danger);
+        font-size: 10.5px;
+        line-height: 1.35;
+    }
+
+    .volume-footer {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        padding-top: 8px;
+        border-top: 1px solid var(--sep);
+    }
+
+    .volume-link {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        gap: 9px;
+        padding: 7px 8px;
+        border: 0;
+        border-radius: 9px;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 11px;
+        text-align: left;
+        cursor: default;
+    }
+
+    .volume-link:hover {
+        background: var(--hover);
+    }
+
+    .volume-link > svg:first-child {
+        flex: none;
+        color: var(--text-dim);
+    }
+
+    .volume-chevron {
+        flex: none;
+        margin-left: auto;
+        color: var(--text-dim);
     }
 
     .wifi-header {

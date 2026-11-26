@@ -372,6 +372,28 @@ pub async fn set_media_muted(muted: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn master_audio() -> Option<win::audio::MasterAudioState> {
+    tauri::async_runtime::spawn_blocking(win::audio::master_state)
+        .await
+        .ok()
+        .flatten()
+}
+
+#[tauri::command]
+pub async fn set_master_volume(volume: f32) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || win::audio::set_master_volume(volume))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_master_muted(muted: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || win::audio::set_master_muted(muted))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub fn media_control(action: String, position_ms: Option<u64>) -> Result<(), String> {
     win::media::control(&action, position_ms)
 }
@@ -627,6 +649,7 @@ pub fn open_settings_page(page: String) -> Result<(), String> {
     let uri = match page.as_str() {
         "network" => "ms-settings:network-status",
         "sound" => "ms-settings:sound",
+        "mixer" => "ms-settings:apps-volume",
         "battery" => "ms-settings:batterysaver",
         _ => return Err(format!("pagina de configuracoes desconhecida: {page}")),
     };

@@ -8,6 +8,7 @@ import type {
     MediaStatus,
     MediaPreviewSession,
     MediaPreviewTab,
+    MasterAudio,
     MediaAudio,
     MediaTimeline,
     SystemStatus,
@@ -41,6 +42,11 @@ export const api = {
         invoke<void>('set_media_volume', { volume }),
     setMediaMuted: (muted: boolean) =>
         invoke<void>('set_media_muted', { muted }),
+    getMasterAudio: () => invoke<MasterAudio | null>('master_audio'),
+    setMasterVolume: (volume: number) =>
+        invoke<void>('set_master_volume', { volume }),
+    setMasterMuted: (muted: boolean) =>
+        invoke<void>('set_master_muted', { muted }),
     mediaControl: (action: string, positionMs?: number) =>
         invoke<void>('media_control', {
             action,

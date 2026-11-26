@@ -12,6 +12,7 @@
 - Launcher com busca em janelas abertas, previews de mídia compactos e pastas na dock.
 - Prévia ao vivo da mídia: clicar na capa abre um quadro ao vivo do vídeo; em navegadores, a aba correspondente é ativada e restaurada ao fechar.
 - Controle de volume e mudo por aplicativo no painel de mídia, independente do volume do Windows.
+- Controle rápido do volume do sistema: clicar no ícone de som abre um painel com volume mestre, mudo, misturador de volume e configurações de som do Windows.
 - Controle de tempo preciso: sincroniza a posição com o player do navegador, permite arrastar a barra e pular 10 segundos.
 
 ### Corrigido

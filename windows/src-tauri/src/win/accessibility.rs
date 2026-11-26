@@ -45,14 +45,32 @@ pub fn select_tab(hwnds: &[i64], title: &str) -> Option<TabSelection> {
     }
 
     let hwnds = hwnds.to_vec();
+    let thread_hwnds = hwnds.clone();
     let title = title.to_string();
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let found = unsafe { select_inner(&hwnds, &title, &wanted) };
+        let found = unsafe { select_inner(&thread_hwnds, &title, &wanted) };
         let _ = sender.send(found);
     });
 
-    receiver.recv_timeout(UIA_TIMEOUT).ok().flatten()
+    match receiver.recv_timeout(UIA_TIMEOUT) {
+        Ok(result) => {
+            log::info!(
+                "accessibility select_tab: hwnds={:?} found={}",
+                hwnds,
+                result.is_some()
+            );
+            result
+        }
+        Err(_) => {
+            log::warn!(
+                "accessibility select_tab timed out after {:?} (hwnds={:?})",
+                UIA_TIMEOUT,
+                hwnds
+            );
+            None
+        }
+    }
 }
 
 pub fn restore_tab(selection: &TabSelection) -> bool {
@@ -196,6 +214,13 @@ unsafe fn select_inner(hwnds: &[i64], title: &str, wanted: &str) -> Option<TabSe
                 break;
             }
         }
+
+        log::info!(
+            "accessibility window hwnd={:?} tabs={} media_found={}",
+            hwnd,
+            count,
+            media.is_some()
+        );
 
         let Some(media) = media else {
             continue;

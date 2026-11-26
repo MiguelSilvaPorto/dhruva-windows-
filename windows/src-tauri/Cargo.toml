@@ -56,3 +56,12 @@ base64 = "0.22"
 log = "0.4"
 simplelog = "0.12"
 anyhow = "1"
+
+# The window preview crops and resizes every captured frame. That crate is
+# unusably slow in an unoptimized build (about 1 s per thumbnail), so it is
+# always compiled with optimizations, even in dev and test profiles.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.test.package.image]
+opt-level = 3

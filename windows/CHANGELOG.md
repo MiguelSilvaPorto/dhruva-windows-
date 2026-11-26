@@ -16,6 +16,7 @@
 
 ### Corrigido
 
+- A prévia de janelas da dock carrega bem mais rápido: as miniaturas começam a ser capturadas assim que o ponteiro para no ícone, trafegam em JPEG compacto e reaparecem na hora enquanto uma nova captura é feita em segundo plano.
 - A dock volta a reservar a área da tela ao ser exibida e depois do desbloqueio; janelas maximizadas não ficam mais por baixo dela.
 - Passar o mouse pela prévia de uma janela não traz mais o aplicativo para frente; somente o clique ativa a janela.
 - A tecla Windows não abre mais o menu Iniciar nativo; o foco volta ao aplicativo anterior ao fechar a pesquisa.

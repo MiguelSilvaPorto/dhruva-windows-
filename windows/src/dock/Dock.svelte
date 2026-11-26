@@ -206,10 +206,22 @@
     let previewHover = false;
     let previewHoverHwnd = $state<number | null>(null);
     let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
+    let previewPrefetchTimer: ReturnType<typeof setTimeout> | undefined;
     const previewCache = new Map<
         number,
         { url: string | null; at: number }
     >();
+    const previewInflight = new Map<number, Promise<string | null>>();
+
+    // The preview opens after this delay; captures start a little before it,
+    // so the thumbnails are usually ready before the panel appears.
+    const PREVIEW_SHOW_DELAY = 320;
+    const PREFETCH_DELAY = 70;
+    // Thumbnails stay usable while a fresh frame is captured in background.
+    const THUMB_FRESH_MS = 10_000;
+    const THUMB_KEEP_MS = 120_000;
+    const THUMB_MAX_WIDTH = 240;
+    const THUMB_MAX_HEIGHT = 132;
 
     let baseWidth = $state(0);
     let baseCenters: number[] = [];
@@ -870,6 +882,8 @@
             clearTimeout(revealTimer);
             clearTimeout(tooltipTimer);
             clearTimeout(regionTimer);
+            clearTimeout(previewPrefetchTimer);
+            clearTimeout(previewHideTimer);
             clearTimeout(wifiForgetTimer);
             clearTimeout(bgConfirmTimer);
             clearTimeout(workspacePulseTimer);
@@ -1272,6 +1286,7 @@
             clearTimeout(tooltipTimer);
             tooltipVisible = false;
             if (previewOpen && previewKey !== item.key) hidePreview();
+            schedulePreviewPrefetch(index);
         }
 
         tooltipLabel = label;
@@ -1291,11 +1306,12 @@
             tooltipBottom = window.innerHeight - rect.top + 10;
             tooltipVisible = true;
             openPreviewForIndex(index);
-        }, 520);
+        }, PREVIEW_SHOW_DELAY);
     }
 
     function hideTooltipNow() {
         clearTimeout(tooltipTimer);
+        clearTimeout(previewPrefetchTimer);
         tooltipVisible = false;
     }
 
@@ -1376,37 +1392,99 @@
             .catch(error => console.error('focus_window failed', error));
     }
 
-    async function loadPreviewThumbs(windows: WindowInfo[], seq: number) {
-        const now = Date.now();
+    function previewThumbRequest(): [number, number] {
+        // Capture only the pixels the card actually shows, even on HiDPI.
+        const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+        return [
+            Math.round(THUMB_MAX_WIDTH * dpr),
+            Math.round(THUMB_MAX_HEIGHT * dpr),
+        ];
+    }
+
+    function cachedPreviewThumb(hwnd: number) {
+        const cached = previewCache.get(hwnd);
+        if (!cached) return undefined;
+        if (Date.now() - cached.at > THUMB_KEEP_MS) {
+            previewCache.delete(hwnd);
+            return undefined;
+        }
+        return cached;
+    }
+
+    function capturePreviewThumb(hwnd: number): Promise<string | null> {
+        // Prefetch and the open panel share the same capture.
+        const inflight = previewInflight.get(hwnd);
+        if (inflight) return inflight;
+
+        const [width, height] = previewThumbRequest();
+        const promise = api
+            .windowPreviewJpeg(hwnd, width, height)
+            .then(url => {
+                previewCache.set(hwnd, { url, at: Date.now() });
+                return url;
+            })
+            .catch(() => {
+                previewCache.set(hwnd, { url: null, at: Date.now() });
+                return null;
+            })
+            .finally(() => {
+                previewInflight.delete(hwnd);
+            });
+
+        previewInflight.set(hwnd, promise);
+        return promise;
+    }
+
+    function schedulePreviewPrefetch(index: number) {
+        clearTimeout(previewPrefetchTimer);
+        const item = previewItem(index);
+        if (!item || item.windows.length === 0) return;
+
+        const windows = item.windows;
+        previewPrefetchTimer = setTimeout(() => {
+            const now = Date.now();
+            for (const window of windows) {
+                if (window.minimized) continue;
+                const cached = cachedPreviewThumb(window.hwnd);
+                if (cached?.url && now - cached.at < THUMB_FRESH_MS) continue;
+                void capturePreviewThumb(window.hwnd);
+            }
+        }, PREFETCH_DELAY);
+    }
+
+    function loadPreviewThumbs(windows: WindowInfo[], seq: number) {
         for (const window of windows) {
             if (window.minimized) {
-                previewThumbs = { ...previewThumbs, [window.hwnd]: null };
+                if (seq === previewSeq) {
+                    previewThumbs = { ...previewThumbs, [window.hwnd]: null };
+                }
                 continue;
             }
 
-            const cached = previewCache.get(window.hwnd);
-            if (cached && now - cached.at < 4000) {
-                previewThumbs = { ...previewThumbs, [window.hwnd]: cached.url };
+            const cached = cachedPreviewThumb(window.hwnd);
+            if (cached?.url) {
+                if (seq === previewSeq) {
+                    previewThumbs = {
+                        ...previewThumbs,
+                        [window.hwnd]: cached.url,
+                    };
+                }
+                if (Date.now() - cached.at < THUMB_FRESH_MS) continue;
+
+                // Show the old frame right away and refresh behind the scenes.
+                void capturePreviewThumb(window.hwnd).then(url => {
+                    if (seq !== previewSeq || !url || url === cached.url) return;
+                    previewThumbs = { ...previewThumbs, [window.hwnd]: url };
+                });
                 continue;
             }
 
             previewLoading = { ...previewLoading, [window.hwnd]: true };
-            api
-                .windowPreview(window.hwnd, 480, 300)
-                .then(url => {
-                    previewCache.set(window.hwnd, { url, at: Date.now() });
-                    if (seq !== previewSeq) return;
-                    previewThumbs = { ...previewThumbs, [window.hwnd]: url };
-                })
-                .catch(() => {
-                    previewCache.set(window.hwnd, { url: null, at: Date.now() });
-                    if (seq !== previewSeq) return;
-                    previewThumbs = { ...previewThumbs, [window.hwnd]: null };
-                })
-                .finally(() => {
-                    if (seq !== previewSeq) return;
-                    previewLoading = { ...previewLoading, [window.hwnd]: false };
-                });
+            void capturePreviewThumb(window.hwnd).then(url => {
+                if (seq !== previewSeq) return;
+                previewThumbs = { ...previewThumbs, [window.hwnd]: url };
+                previewLoading = { ...previewLoading, [window.hwnd]: false };
+            });
         }
     }
 
@@ -1436,13 +1514,27 @@
         );
         const half = estimatedWidth / 2;
 
+        const ordered = [...item.windows].sort(
+            (a, b) => Number(b.focused) - Number(a.focused),
+        );
+
+        // Paint whatever the prefetch already has before the panel opens,
+        // instead of flashing empty placeholders.
+        const knownThumbs: Record<number, string | null> = {};
+        for (const window of ordered) {
+            if (window.minimized) {
+                knownThumbs[window.hwnd] = null;
+                continue;
+            }
+            const cached = cachedPreviewThumb(window.hwnd);
+            if (cached?.url) knownThumbs[window.hwnd] = cached.url;
+        }
+
         previewKey = item.key;
         previewName = item.name;
         previewIcon = item.icon;
-        previewWindows = [...item.windows].sort(
-            (a, b) => Number(b.focused) - Number(a.focused),
-        );
-        previewThumbs = {};
+        previewWindows = ordered;
+        previewThumbs = knownThumbs;
         previewLoading = {};
         previewLeft = Math.max(
             half + 10,
@@ -1456,7 +1548,7 @@
         if (previewHover) previewHover = false;
         cancelPreviewHide();
         void tick().then(() => sendRegion(hovering));
-        void loadPreviewThumbs(previewWindows, previewSeq);
+        loadPreviewThumbs(ordered, previewSeq);
     }
 
     function openPreviewWindow(window: WindowInfo) {
